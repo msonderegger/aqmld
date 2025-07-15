@@ -1,0 +1,703 @@
+# Multivariate models {#sec-dd-1}
+
+These lecture notes cover topics from:
+
+-   @burkner2024estimating
+
+The reading here is short for two reasons, the second more important than the first:
+
+-   Students in the 2024 McGill class had a lot to do for the week of these readings
+-   I'm not aware of any readings on fitting and interpreting multivariate (response) models for linguistic data.
+
+Related readings:
+
+-   @barreda2023bayesian Sec. 12.2---discusses multinomial models, which are (under the hood) multivariate models.
+-   Some sections of @mcelreath2020statistical (and @kurz2021statistical translation into brms), e.g. Secs. 5.1.5.3, 11.3.2.1.
+-   @smith.etal2024 and [associated code and vignette](https://github.com/MontrealCorpusTools/MMO_vowel_overlap): a more complex example of the type of model fitted below (to vowel formant F1/F2 data) including random effects.
+
+Topics:
+
+-   Multivariate models: examples
+-   Intrinsically-related $y_1$ and $y_2$
+-   Not-IR $y_1$ and $y_2$: testing relatedness
+    -   \`\`Tying'' models of $y_1$ and $y_2$
+-   TODO: Mixture models
+    -   Data = mixture of $y_1$ and $y_2$ distributions
+-   Coming in a later chapter: mediation
+    -   $y_1$ is a predictor of $y_2$
+    -   $y_1$ mediates the effect of $x$ on $y_2$
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE, cache=FALSE}
+library(brms)
+library(lme4)
+library(arm)
+library(tidyverse)
+
+library(tidybayes)
+
+library(bayestestR)
+
+library(phonTools) # TODO
+
+library(patchwork)
+
+# avoids bug where select from MASS is used
+select <- dplyr::select
+```
+
+::: {.callout-tip collapse="true"}
+### Practical notes
+
+1.  If you have loaded `rethinking`, you need to detach it before using brms. See @kurz2021statistical Sec. 4.3.1.
+
+2.  I use the `file` argument when fitting `brms` models to make compiling this document easier (so the models don't refit every time I compile). You may or may not want to do this for your own models. See `file` and `file_refit` arguments in `?brm`.
+
+3.  Here I set the `file_refit` option so "brms will refit the model if model, data or algorithm as passed to Stan differ from what is stored in the file."
+
+```{r}
+options(brms.file_refit = "on_change")
+```
+
+4.  I use `chains = 4, cores = 4` when fitting `brm` models below---this means 4 chains, each to be run on one core on my laptop. `cores = 4` may need to be adjusted for your computer. (You may have fewer or more cores; I have 8 cores, so this leaves 50% free.) **You should figure out how to use multiple cores on your machine**.
+
+5.  Make numbers be printed only to 3 digits, for neater output:
+
+```{r}
+options(digits = 3)
+```
+:::
+
+## Data
+
+<!-- Load data from TODO-H95 -->
+
+<!-- ```{r} -->
+
+<!-- data(h95) -->
+
+<!-- ``` -->
+
+### American English vowels {#sec-mv1-aev}
+
+Install the [joeysvowels](https://joeystanley.github.io/joeysvowels/) package [@joeysvowels], if you haven't done so already:
+
+```{r, eval = FALSE}
+remotes::install_github("joeystanley/joeysvowels")
+```
+
+> The joeysvowels package provides a handful of datasets, some subsets of others, that contain formant measurements and other information about the vowels in my own speech. The purpose of the package is to make vowel data easily accessible for demonstrating code snippets when demonstrating working with sociophonetic data.
+
+```{r}
+library(joeysvowels)
+
+midpoints <- mutate(midpoints, dur = end - start)
+```
+
+We'll use the `midpoints` dataset: <!-- , a subset of `coronals`:  --> these are measures of F1 and F2 at vowel midpoint for one speaker's vowels from many words in a controlled context (surrounding coronal consonants): "odd", "dad", "sod", "Todd", and so on. Standard F1/F2 vowel plot of all data, with 95% ellipses:[^multivariate-models-1]
+
+[^multivariate-models-1]: If you're not familiar with these kinds of plot: $x$ and $y$ axes go from larger to smaller.
+
+```{r}
+#| code-fold: true
+
+midpoints %>% ggplot(aes(x = F2, y = F1)) +
+  geom_point(aes(color = vowel), size = 0.2) +
+  scale_x_reverse() +
+  scale_y_reverse() +
+  stat_ellipse(level = 0.95, aes(color = vowel))
+```
+
+Note how vowel distributions differ both in location (in F1/F2 space) and shape: the direction and size of the ellipse.
+
+Let's further restrict to just the THOUGHT and LOT vowels for a simple example:
+
+```{r}
+twovowels <- filter(midpoints, vowel %in% c("LOT", "THOUGHT")) %>% droplevels()
+```
+
+RQs for this data could be:
+
+1.  Are LOT and THOUGHT pronounced differently?
+2.  If so, how?
+
+These two vowels are merged for many North American English speakers, but (by [self-report](https://joeystanley.com/pages/idiolect/#my-low-back-vowels)) not for this speaker.
+
+Their data for just these vowels looks like:
+
+```{r}
+#| code-fold: true
+
+twovowels %>% ggplot(aes(x = F2, y = F1)) +
+  geom_point(aes(color = vowel), size = 0.2) +
+  scale_x_reverse() +
+  scale_y_reverse() +
+  stat_ellipse(level = 0.95, aes(color = vowel))
+```
+
+### Canadian English voice quality
+
+This is data from a project by [Jeanne Brown](https://jeanne-brown.github.io/), a PhD student at McGill.
+
+```{r}
+vq_data <- readRDS("jb_creak_data.rds")
+```
+
+This is a greatly simplified subset of the data from from Jeanne's paper on acoustic measures of "creaky voice" in Canadian English-French bilingual speakers [@brown2025sociophonetic] .[^multivariate-models-2]
+
+[^multivariate-models-2]: The full dataset is [here](https://osf.io/4ghbn/).
+
+This subset is just:
+
+-   A couple acoustic measures
+-   English speech only (the dataset also contains French)
+-   Only one utterance position (66-99% through utterance)
+
+There are `r nrow(vq_data)` observations.
+
+Every row corresponds to two acoustic measures that correlate with creaky voice, measured for a single vowel, in a corpus of podcast speech:
+
+-   `CPP`: cepstral peak prominence
+    -   Continuous, where a lower value is expected to correlate with creakiness.
+-   `bad_f0_track`: whether f0 could *not* be measured for this vowel
+    -   Binary (0/1), where 1 is expected to correlate with creakiness.
+
+Other columns:
+
+-   `Sex`, `Sex_c`: factor and (centered) numeric versions of speaker gender (higher = male)
+-   `YOB`, `YOB_c`: raw and normalized (mean/2 SD) year of birth of speaker.
+-   `dev_rate`: a measure of speaking rate, relative to the speaker's mean.
+-   `prev_seg`, `foll_seg`: what kind of segment precede and follow the vowel:
+    -   `vowel`, or various consonants (`voiceless stop`, etc.), or `none` (= word boundary)
+
+The actual research questions are:
+
+1.  Does speaker `Sex` affect creakiness?
+2.  Does speaker `YOB` affect creakiness?
+
+Jeanne's paper examines these questions on one acoustic measure at a time. We'll consider a couple additional questions, made possible by jointing modeling the two acoustic measures.
+
+3.  Do speakers with higher `CPP` have a higher probability of `bad_f0_track`?
+4.  Do *contexts* ?
+
+Either one would give insight into whether there is one underlying aspect of voice quality being captured by both measures.
+
+Empirical plots:
+
+```{r}
+p1 <- vq_data %>% group_by(Speaker) %>% mutate(CPP = mean(CPP)) %>% 
+  ggplot(aes(x = Sex, y = CPP)) + geom_boxplot() + labs(y = "Speaker average CPP")
+
+p2 <- vq_data %>% group_by(Speaker) %>% mutate(CPP = mean(CPP)) %>% 
+  ggplot(aes(x = YOB, y = CPP)) + geom_smooth(method = 'lm') + geom_point() + labs(y = "Speaker average CPP")
+
+p1 + p2
+
+
+p3 <- vq_data %>% group_by(Speaker) %>% mutate(bt = mean(bad_f0_track)) %>% 
+  ggplot(aes(x = Sex, y = bt)) + geom_boxplot() + labs(y = "Speaker % bad f0 tracks")
+
+p4 <- vq_data %>% group_by(Speaker) %>% mutate(bt = mean(bad_f0_track)) %>% 
+  ggplot(aes(x = YOB, y = bt)) + geom_smooth(method = 'lm') + geom_point() + labs(y = "Speaker % bad f0 tracks")
+
+p3 + p4
+
+```
+
+TODO: make similar plots by context
+
+## Intrinsically-related $y_1$ and $y_2$
+
+A *multivariate* model is one where two or more response variables are modeled simultaneously. In these notes we assume there are just two variables being modeled, called $y_1$ and $y_2$.
+
+While the model doesn't care how $y_1$ and $y_2$ are conceptually related, it's useful to think about different cases:
+
+-   $y_1$ and $y_2$ are *intrinsically* related
+    -   RQs typically about how factors jointly affect $y_1$ and $y_2$
+-   $y_1$ and $y_2$ aren't intrinsically related
+    -   RQs can assess whether and how they're related
+
+An example of the first type is vowel data, which is commonly modeled with at least F1 (first formant) and F2 (second formant). Sometimes F3 and/or duration are included as well.
+
+While F1 and F2 are roughly related to articulatory parameters (jaw opening and tongue backness), this is a rough approximation, and any phonetician would agree that vowels "occur" in multi-dimensional cue space. This is the sense in which F1 and F2 are intrinsically-related.
+
+### Independent models
+
+Nonetheless, in analyzing formant data, researchers usually model F1 and F2 are as *independent*. Let's do this for the `twovowels` data, accounting for differences between vowels in location and shape.
+
+To keep our model relatively simple, we'll assume that shape (parametrized by `sigma`) doesn't differ by-word (our data is too sparse to estimate this anyway).
+
+This would be two distributional linear mixed-effects models:
+
+```{r}
+## Include weak priors, so we can calculate Bayes Factors later
+##
+## Prior: 250 Hz is a large effect for formants
+## 15 Hz is a large effect for log
+prior_1 <- c(
+  prior(normal(0, 250), class = b),
+  prior(normal(0, 15), class = b, dpar = sigma)
+)
+
+## formula for F1 model
+bf1 <- bf(
+  F1 ~ vowel,
+  sigma ~ vowel
+)
+
+## formula for F2 model
+bf2 <- bf(
+  F2 ~ vowel,
+  sigma ~ vowel
+)
+
+## Fitting with more iterations than usual, to get OK Bayes factors
+## really should be iter = 10k
+tv_f1_m1 <- brm(
+  formula = bf1, 
+  family = gaussian(), 
+  data = twovowels, 
+  prior = prior_1, 
+  chains = 4, cores = 4, iter = 4000, 
+  file = "models/tv_f1_m1.brm"
+)
+
+
+tv_f2_m1 <- brm(
+  formula = bf2, 
+  family = gaussian(), 
+  data = twovowels, 
+  prior = prior_1, 
+  chains = 4, cores = 4, iter = 4000, 
+  file = "models/tv_f2_m1.brm"
+  )
+```
+
+Model results:
+
+```{r}
+tv_f1_m1
+tv_f2_m1
+```
+
+Bayes Factors:
+
+```{r}
+bf_pointnull(tv_f1_m1)
+bf_pointnull(tv_f2_m1)
+```
+
+(These are approximate because we didn't fit the model for many iterations!)
+
+Answers to our RQs, for F1 and F2 separately:
+
+-   Yes, they're different, in both F1 and F2
+-   `vowel` = *THOUGHT*:
+    -   lower F1 and F2, much clearer for F2
+    -   Possible more variable in F2 (95% CredI positive, but BF is inconclusive)
+
+#### Plotting model predictions {#sec-mv1-pmp1}
+
+Let's plot model predictions as F1/F2 ellipses, for the LOT and THOUGHT vowels.
+
+For 95% prediction ellipses (like 95% PIs, but in 2D), we first simulate data for each `vowel` for F1 and F2, separately.[^multivariate-models-3]
+
+[^multivariate-models-3]: Note that these data actually come from different words (column `word`), so our model should include random effects. I haven't included random effects just to get the models to fit faster, for pedagogical purposes, and because there are very few observations here anyway (127) relative to model complexity
+
+```{r}
+nd <- data.frame(
+  vowel = c("THOUGHT", "LOT")
+)
+##
+f1_samples <- tv_f1_m1 %>%
+  add_predicted_draws(newdata = nd, ndraws = 1000) %>%
+  dplyr::select(.draw, vowel, F1 = .prediction)
+
+f2_samples <- tv_f2_m1 %>%
+  add_predicted_draws(newdata = nd, ndraws = 1000) %>%
+  dplyr::select(.draw, vowel, F2 = .prediction)
+```
+
+These just look like:
+
+```{r}
+f1_samples %>% head()
+```
+
+Merge F1 and F2 into one dataframe, by matching draws across the two dataframes of predictions:
+
+```{r}
+merged_samples <- inner_join(
+  f1_samples,
+  f2_samples, 
+  by = c(".draw", "vowel")
+  ) %>% ## drop irrelevant columns
+  select(vowel, F1, F2)
+```
+
+F1/F2 plot with 95% prediction ellipses, over the empirical data:
+
+```{r}
+#| code-fold: true
+
+ggplot(merged_samples, aes(x = F2, y = F1, color = vowel)) +
+  geom_point(alpha = 0.5, size = 0.5, data = twovowels) +
+  stat_ellipse(level = 0.95) +
+  theme_minimal() +
+  labs(x = "F1 (Hz)", y = "F2 (Hz)") +
+  scale_x_reverse() +
+  scale_y_reverse()
+```
+
+We can do the same procedure to produce 95% *credible ellipses* by replacing `add_predicted_draws()` with `add_epred_draws()` in the code above.
+
+This gives:
+
+```{r}
+#| code-fold: true
+
+f1_samples <- tv_f1_m1 %>%
+  add_epred_draws(newdata = nd, ndraws = 1000) %>%
+  select(.draw, vowel, F1 = .epred)
+
+f2_samples <- tv_f2_m1 %>%
+  add_epred_draws(newdata = nd, ndraws = 1000) %>%
+  select(.draw, vowel, F2 = .epred)
+
+merged_samples <- inner_join(f1_samples, f2_samples, by = c(".draw", "vowel")) %>% ## drop irrelevant columns
+  select(vowel, F1, F2)
+
+ggplot(merged_samples, aes(x = F2, y = F1, color = vowel)) +
+  stat_ellipse(level = 0.95) +
+  theme_minimal() +
+  geom_point(alpha = 0.5, size = 0.5, data = twovowels) +
+  labs(x = "F1 (Hz)", y = "F2 (Hz)") +
+  scale_x_reverse() +
+  scale_y_reverse()
+```
+
+The second plot captures visually the result that LOT and THOUGHT are distinct in both F1 and F2: the ellipses are nowhere near overlapping on either axis.
+
+------------------------------------------------------------------------
+
+This univariate method, where F1 and F2 are analyzed separately, is a perfectly OK way to analyze vowel formant data, but there are a few issues:
+
+-   Our RQs are about effects on F1 and F2 *jointly* (and potentially other acoustic cues, like F3 or duration)---but we are reporting on each one separately.
+    -   At best, the univariate approach is losing power.
+-   The models assume that F1 and F2 are uncorrelated---visually, that the F1/F2 ellipses are not tilted in F1/F2 space. We can see that's not the case from the empirical plot, especially for `vowel` = *THOUGHT*.
+
+### Multivariate model
+
+We can address these issues by fitting a *multivariate* model.
+
+```{r}
+## when all response variables have the same
+## model structure, can use this shortcut
+bf3 <- bf(mvbind(F1, F2) ~ vowel, sigma ~ vowel) +
+  set_rescor(TRUE)
+
+## set a very weak prior, so we can calculate Bayes Factors later.
+prior_2 <- c(
+  prior(normal(0, 250), resp = F1, class = b),
+  prior(normal(0, 250), resp = F2, class = b),
+  prior(normal(0, 15), class = b, resp = F1, dpar = sigma),
+  prior(normal(0, 15), class = b, resp = F2, dpar = sigma)
+)
+
+## here we save parameters so we'll be able to calculate
+## Bayes Factors versus subset models later.
+tv_joint_m1 <- brm(
+  formula = bf3,
+  family = gaussian(), 
+  data = twovowels, 
+  chains = 4, cores = 4, iter = 2000, 
+  prior = prior_2, 
+  save_pars = save_pars(all = TRUE), 
+  file = "models/tv_joint_m1.brm"
+)
+```
+
+Some notes:
+
+-   `set_rescor(TRUE)`: allows the residuals of F1 and F2 to be correlated.
+    -   This makes sense in the current case (F1 and F2 are intrinsically related), but in other cases (i.e., mediation analyses) won't necessarily make sense.\
+    -   It's also not possible if one of the models for $y_1$ or $y_2$ doesn't have residuals, as we'll see later.
+-   The `family` argument together with the fact that `formula` refers to multiple response variables is enough for brms to determine that this is a multivariate linear regression model.
+
+Summary:
+
+```{r}
+tv_joint_m1
+```
+
+What some regression coefficients mean:
+
+-   `F1_Intercept`: F1 for `vowel` = *LOT*
+-   `sigma_F1_Intercept`: $\log(\sigma)$ for `vowel` = *LOT*
+-   `sigma_F1_vowelTHOUGHT`: difference in $\log(\sigma)$ between `vowel` = *THOUGHT* and *LOT*.
+
+Another new term is `rescor(F1,F2)`: the correlation between the residuals of F1 and F2. Its interpretation is, "how correlated are F1 and F2, after accounting for other factors \[here: word, vowel\]".
+
+::: {#exr-mv1-1}
+For each of the following coefficients: consider the direction of the model's estimate, as well as whether the 95% CredI overlaps zero. What does this reflect, visually, in the empirical plot of the data in @sec-mv1-aev?
+
+a.  `F2_Intercept`
+
+b.  `F1_vowelTHOUGHT`
+
+c.  `rescor(F1,F2)`
+
+d.  `sigma_F2_vowelTHOUGHT`
+:::
+
+#### Plotting model predictions
+
+To get 95% prediction ellipses, we again simulate data for each `vowel`:
+
+```{r}
+samples <- tv_joint_m1 %>%
+  add_predicted_draws(newdata = nd, ndraws = 1000) %>%
+  ## need to turn data from "long" to "wide" format for plotting
+  pivot_wider(names_from = .category, values_from = .prediction)
+```
+
+These draws look like:
+
+```{r}
+samples %>% head()
+```
+
+F1/F2 plot with 95% prediction ellipses, over the empirical data:
+
+```{r}
+ggplot(samples, aes(x = F2, y = F1, color = vowel)) +
+  stat_ellipse(level = 0.95) +
+  theme_minimal() +
+  geom_point(alpha = 0.5, size = 0.5, data = twovowels) +
+  labs(x = "F1 (Hz)", y = "F2 (Hz)") +
+  scale_x_reverse() +
+  scale_y_reverse()
+```
+
+Comparing to the same plot for the univariate model:
+
+-   Looks much closer to the empirical plot, compared to model predictions in @sec-mv1-pmp1.
+-   Captures the fact that F1 and F2 are not independent, for either LOT or THOUGHT (= ellipses are tilted).
+
+#### Model comparison
+
+The multivariate model also allows us to directly address the question of whether `vowel` matters, by re-fitting the model without `vowel` and then comparing the full and subset models.
+
+```{r}
+bf4 <- bf(mvbind(F1, F2) ~ 1, sigma ~ 1) +
+  set_rescor(TRUE)
+
+## note: using default prior, prior_2 wouldn't work
+tv_joint_m2 <- brm(
+  formula = bf4, ,
+  family = gaussian(), data = twovowels, chains = 4, cores = 4, iter = 3000, save_pars = save_pars(all = TRUE), file = "models/tv_joint_m2.brm"
+)
+```
+
+Model comparison using PSIS-LOO:
+
+```{r}
+tv_joint_m1 <- add_criterion(tv_joint_m1, criterion = "loo", moment_match = TRUE)
+tv_joint_m2 <- add_criterion(tv_joint_m2, criterion = "loo", moment_match = TRUE)
+
+loo_compare(tv_joint_m1, tv_joint_m2)
+```
+
+Model comparison using a Bayes Factor:
+
+```{r}
+bayesfactor_models(tv_joint_m2, tv_joint_m1)
+```
+
+LOO and BF addresses RQ1 with a single number: LOT and THOUGHT differ in F1/F2, and the difference is (highly) meaningful.
+
+::: {#exr-mv1-2}
+Make an F1/F2 plot with 95% confidence ellipses for each `vowel`, for the joint model (`tv_joint_m1`).
+:::
+
+## Assessing relatedness of $y_1$ and $y_2$
+
+We fit a multivariate model of `bad_f0_track` and `CPP` for the `vq_data` dataset, accounting for:
+
+-   Both $y_1$ and $y_2$ can depend on `Sex`, `YOB_c` (RQs 1, 2)
+
+-   Speakers can vary in $y_1$ and $y_2$
+
+-   The way speakers vary may be correlated between $y_1$ and $y_2$ (RQ 3)
+
+-   Contexts can vary in $y_1$ and $y_2$, i.e., `prev_seg` and `foll_seg`
+
+-   The way contexts vary may be correlated between $y_1$ and $y_2$ (RQ 4)
+
+Model formula:
+
+```{r}
+## just a basic prior for random-effect correlation matrices
+prior_1 <- c(
+  prior(lkj(1.5), class=cor) 
+)
+
+
+cpp_model <- brmsformula(
+  CPP ~  Sex_c + YOB_c+dev_rate  +
+    (1 | p | Speaker) +
+    (1 | q | prev_seg) +
+    (1 | r | foll_seg),
+  family = gaussian()
+)
+
+bad_f0_track_model <-  brmsformula(bad_f0_track ~  Sex_c + YOB_c+dev_rate  +
+  (1 | p | Speaker) +
+  (1 | q | prev_seg) +
+  (1 | r | foll_seg), family = bernoulli()
+) 
+
+joint_model <- cpp_model + bad_f0_track_model + set_rescor(FALSE)
+
+```
+
+The full model is:
+
+```{r}
+joint_model
+```
+
+In this formula, note the `| p |` `|q|`, etc. in the random effects. This allows for correlations across random effects for different response variables. For example, `(1 | p | Speaker)`: allows for correlation between by-speaker random intercepts for `cpp` and `bad_track_f0`. Its interpretation is, "how correlated are a speaker's values for these two acoustic cues, after accounting for their `Sex` and `YOB`?"
+
+There are four such terms "tying" the two models (for CPP and bad_f0_track) together.
+
+Fit the model:
+
+```{r}
+cpp_badtrack_joint_m1 <- brm(formula = bf(
+  CPP ~ Sex_c + YOB_c + dev_rate + (1 | p | Speaker) + (1 | q | prev_seg) + (1 | r | foll_seg),
+  bad_f0_track ~ Sex_c + YOB_c + dev_rate + (1 | p | Speaker) + (1 | q | prev_seg) + (1 | r | foll_seg)
+) , 
+                             data = PS_sub2 ,
+                             chains = 4, cores = 4, iter = 2000,
+                             prior = prior_1, 
+                             save_pars = save_pars(all = TRUE),
+                             file = 'models/cpp_badtrack_joint_m1.brm')
+```
+
+Model summary:
+
+```{r}
+cpp_badtrack_joint_m1
+```
+
+A new type of term here are the random-effect correlations corresponding to different models.
+
+`cor(CPP_Intercept,badf0track_Intercept)` is the correlation between by-speaker random intercepts for `cpp` and `bad_track_f0`.
+
+::: {#exr-mv1-3}
+a.  Which terms in the model address RQs 1 and 2? What answers does it suggest?
+
+b.  Which terms in the model address RQs 3 and 4? What answers do they suggest?
+
+c.  Consider the effect of `foll_seg`. Which following contexts give the most and least creakiness (= higher `bad_f0_track`, lower `CPP`)? Can you think of why these make (phonetic) sense?
+:::
+
+<!-- <!-- Let's make this model more realistic and interesting: -->
+
+<!-- <!-- * Add `duration` -->
+
+<!-- <!-- * Rather than `word`, account for effects of preceding and following consonants: `pre` and `fol`.  -->
+
+<!-- <!--   * `pre`, `fol` and `vowel` together uniquely determine `word` -->
+
+<!-- <!-- ```{r} -->
+
+<!-- <!--   bf4 <- bf(mvbind(F1, F2, dur) ~ vowel + (1|p|pre) + (1|q|fol), sigma ~ vowel) + -->
+
+<!-- <!--   set_rescor(TRUE) -->
+
+<!-- <!-- ## set a very weak prior, so we can calculate Bayes Factors later. -->
+
+<!-- <!-- prior_3 <- c(prior(normal(0, 250), resp = F1, class = b), -->
+
+<!-- <!--              prior(normal(0, 250), resp = F2, class = b), -->
+
+<!-- <!--              prior(normal(0, 0.5), resp = dur, class = b), -->
+
+<!-- <!-- prior(normal(0, 15), class = b, resp = F1, dpar = sigma), -->
+
+<!-- <!-- prior(normal(0, 15), class = b, resp = F2, dpar = sigma), -->
+
+<!-- <!-- prior(normal(0, 0.5), class = b, resp = dur, dpar = sigma), -->
+
+<!-- <!-- prior(lkj(1.5), class=cor) -->
+
+<!-- <!-- ) -->
+
+<!-- <!-- twovowels_joint_m3 <- brm(formula = bf4, family = gaussian() , data = twovowels, chains = 4, cores = 4, iter = 4000, prior = prior_3, save_pars = save_pars(all = TRUE), control = list(adapt_delta = 0.99), file = 'models/twovowels_joint_m3.brm') -->
+
+<!-- <!-- ``` -->
+
+<!-- <!-- Summary: -->
+
+<!-- <!-- ```{r} -->
+
+<!-- <!-- twovowels_joint_m3 -->
+
+<!-- <!-- ``` -->
+
+<!-- - if we wanted to say "we don't know" more precisely about the correlation, could use `bf_parameters(twovowels_joint_m1, effects = "random")`.  The output looks something like this: -->
+
+<!-- ```{r, eval = FALSE} -->
+
+<!-- # Random effects SD/Cor: word F2 -->
+
+<!-- Parameter | Response | BF -->
+
+<!-- ---------------------------------------------- -->
+
+<!--   F1_Intercept ~ F2_Intercept | F2 | 0.926 -->
+
+<!-- F2_Intercept | F2 | 0.242 -->
+
+<!-- ``` -->
+
+<!-- What here tells you "we don't know"? -->
+
+<!-- ```{r, eval = FALSE} -->
+
+<!-- bf6 <- bf(mvbind(F1, F2) ~ vowel + (1 + vowel | q | speaker), sigma ~ vowel + (1 | speaker)) + -->
+
+<!--   set_rescor(TRUE) -->
+
+<!-- bf7 <- bf( -->
+
+<!-- mvbind(F1, F2) ~ vowel + (1 + vowel | speaker),  -->
+
+<!-- sigma ~ vowel + (1 | speaker)) + -->
+
+<!--   set_rescor(TRUE) -->
+
+<!-- ## set a very weak prior, so we can calculate Bayes Factors later. -->
+
+<!-- prior_6 <- c( -->
+
+<!--   prior(normal(0, 1000), resp = F1, class = b), -->
+
+<!--   prior(normal(0, 1000), resp = F2, class = b), -->
+
+<!--   prior(normal(0, 15), class = b, resp = F1, dpar = sigma), -->
+
+<!--   prior(normal(0, 15), class = b, resp = F2, dpar = sigma), -->
+
+<!--   prior(lkj(1.5), class = cor) -->
+
+<!-- ) -->
+
+<!-- idahoans_joint_m1 <- brm(formula = bf7, family = gaussian(), data = idahoans, chains = 4, cores = 4, iter = 2000, prior = prior_6, save_pars = save_pars(all = TRUE), file = "models/idahoans_joint_m2.brm") -->
+
+<!-- ``` -->

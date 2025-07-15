@@ -1,0 +1,275 @@
+# Homework 3  {#sec-hw3}
+
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE}
+library(tidyverse)
+library(mgcv)
+library(itsadug)
+
+library(ggeffects)
+```
+
+## Context
+
+### Dataset
+
+This homework uses data from @kirby2018onset: abstract  [here](https://www.sciencedirect.com/science/article/pii/S0095447017301882?casa_token=vp3HKZqXfSwAAAAA:ynm8q8G29T5ibC5wXiqGQlqGE7I3-6x03KUtFbnocfNMybRWTsMUvNTCpOZgzKokLyeOc0e4agA).  I processed the raw data from the [supplementary materials](https://datashare.ed.ac.uk/handle/10283/3160) for the paper to produce the file `kirby_if0_spc.csv`, which contains spectral measures data reported in  @kirby2018onset.
+
+Load this data:
+
+```{r}
+spc <- read.csv("../../data/kirby_if0_spc.csv", stringsAsFactors = TRUE)
+```
+
+### Context: general
+
+Here is context about this data, corresponding to different columns of the dataframe. **You can skip to "Context: this assignment"** if you wish, and just come back to this section if you need more detail about the data.
+
+* Each `subject` read each item (`item`), for their native language, three times (`repetition`)
+* Each item is a syllable CV
+  * beginning in consonant `onset`, values `d`  `l`  `n`  `t`  `tʰ`
+  * V = `vowel`
+  * `tone` = tone for the tone languages (`language` = Thai, Vietnamese); for the non-tone language Khmer, this is the same as `vowel`
+* `context`: words read either in *isolation* or in a *carrier* sentence
+* `t`: time, in msec, relative to the onset of the vowel
+* `f0`: F0, in Hz
+* `st`: F0, transformed to *semitones*
+  1. Speaker normalization: divide by speaker's mean F0
+  2. Transform to auditory scale: log-base-2-transform and multiply (that value) by 12.
+  
+The general question of interest for this data is the relationship between `onset` and F0, across three languages. 
+
+Of primary interest is differences between `onset` =
+
+* *tʰ*, *t*, *d*: expected to decrease in F0/st (e.g., *t* > *d*), called *intrinsic F0 effects*.  
+* *n*: included as a sonorant, against which other F0 perturbations from the C (for obstruents) can be measured.
+
+It is of interest not just whether F0/st differs by `onset`, but how the trajectory differs as a function of `t` (time).
+
+Here are some plots of F0 over time (in semitones) as a function of `onset`, in a similar format to  @kirby2018onset, from just the Thai data:
+
+```{r, warning = FALSE, message = FALSE}
+## filtering out timepoints which can't be part of the stop, for clarity
+filter(spc, language == "Thai" & onset %in% c("d", "t", "tʰ", "n") & t > (-50)) %>% ggplot(aes(x = t, y = st)) +
+  geom_smooth(aes(color = onset)) +
+  facet_grid(context ~ tone)
+```
+
+Pitch is greatly influenced by tone, as we'd expect. It looks like there are differences in F0 trajectory between different onsets, which may be modulated by tone and context.
+
+### Context: this assignment
+
+The dependent variable is `st`, which is a speaker-normalized version of `f0` (in Hz), transformed to an auditory scale (semitones).  To make this data more intuitive, let's rename and define some variables::
+
+* `st` $\to$ `pitch`
+* `trajectory`: a single pitch trajectory = a unique value of `item`:`context`:`repetition`, for a unique `subject`
+
+
+```{r}
+spc <- spc %>%
+  mutate(
+    pitch = st,
+    trajectory = interaction(item, repetition, context, subject)
+  ) %>%
+  droplevels()
+```
+
+For example, here are all pitch trajectories for subject *TF1*:
+
+```{r}
+spc %>% filter(subject == 'TF1') %>% ggplot(aes(x = t, y = pitch)) + geom_line(aes(group = trajectory, color = onset))
+```
+
+
+To keep things simple, we will consider just:
+
+* `onset` = *d* and *th*
+* Thai data
+* `t` > 0 (meaning: pitch measured during the vowel)
+
+```{r}
+thai_df <- filter(spc, t >= 0 & onset %in% c("d", "tʰ") & language == "Thai") %>% droplevels()
+```
+
+
+Some processing of factors:
+
+```{r}
+thai_df <- thai_df %>% mutate(
+  ## tone: falling, mid, low
+  tone = fct_relevel(tone, "mid", after = 1)
+)
+```
+
+Thai is a tone language, and it is of interest whether there is *any* difference in trajectories for each `onset`.  It is possible that tone languages do not show intrinsic F0 effects, or that any effect is variable across contexts and speakers.
+
+
+Our **research questions** are:
+
+* *Primary*
+  1. Do the `pitch` trajectories differ by `onset` (between *d* and *tʰ*)?
+  * This is largely a question about shape---how large is the `onset` effect at its maximum (`t` = 0), and how long does any difference  persist into the vowel?
+
+* *Secondary*
+  2. Is any `onset` effect robust?  Namely, how much does it differ by `tone` and `context` (isolation vs. carrier phrase)?
+  
+  3. Does the `onset` effect differ between speakers?
+
+In this homework, you'll carry out an analysis addressing these research questions.
+
+
+## Part 1: GAM
+
+You'll first build and interpret a model without random effects.  
+
+This is not a "good" model---for any data with repeated measures (here, by-subject), a valid model needs random effects.  However, such a model is often considered as a first step towards a "real" GAMM model. This homework gives practice with this method of "building up" a model for repeated-measures data.
+
+### Model structure / Exploratory analysis
+
+To motivate our model structure, we consider (1) domain knowledge, (2) the experimental design, and (3) exploratory plots.  We are primarily interested in time trajectories---smooths of `t`.  Each predictor mentioned above---`tone`, `onset`, and `context`--could affect the height or shape of these trajectories.  Any such effect could differ by speaker. 
+
+We first abstract away from speaker variability to consider "overall" effects of each predictor, motivated by (1) and (2):
+
+* `tone`: expected to affect trajectory height and shape (this is the definition of tone).
+* `onset`: whether it affects trajectory height and shape are required for RQ1.
+* `context`: expected from previous work to affect trajectory height and shape (words in isolation have different pitch trajectories).
+* `context` and `tone`  interactions with `onset`:this is relevant for RQ2. 
+  * From previous work: different `onset` trajectories may be more separated in isolation context, and in high tone words.^[Note that Thai "high" tone is phoentically "high-falling", corresponding to the *falling* level of `tone`.]
+  * Addressing RQ2 requires at least accounting for `context`:`onset` and `tone`:`onset` interactions w.r.t trajectory height
+  * Unclear: trajectory *shape*.
+  
+These observations alone motivate a basic model structure.  Let's also examine (3) empirical plots of the `onset` effect, by `tone` and `context`, as a sanity check:
+
+```{r, message=FALSE}
+thai_df %>%
+  ggplot(aes(x = t, y = pitch)) +
+  geom_smooth(aes(color = onset)) +
+  facet_wrap(~ context + tone)
+```
+
+Trajectory height and shape are clearly affected by `context` and `tone`, while the overall effect of `onset` is unclear (good---this is RQ 1), as is possible modulation of `onset` by `context`/`tone` (RQ 2).
+
+### A first model
+
+**Question 1**
+
+a. What is the formula for a GAM model motivated by the discussion above?  Your model should contain terms capturing all bullet points except the "Unclear" one.
+  * I recommend coding `onset`, `context`, and `tone` so the model contains "difference smoooths".
+  * Note that you do *not* need to allow the smooths to vary by the interaction of `context`:`onset` or `tone`:`onset`. You do need to allow the *height* of the smooths to vary by these interactions.
+
+b. Fit this model, without autocorrelation.
+
+c. Re-fit the model accounting for within-trajectory autocorrelation. Save the resulting model as `thai_m1`.
+
+Print a summary of this model:
+
+```{r, eval = FALSE}
+summary(thai_m1)
+```
+
+
+### Interpretation
+
+Because this model doesn't include random effects, we shouldn't perform actual model comparisons / examine its $p$-values.  Let's instead interpret its results visually:
+
+Assuming your model contains a term called `onset_ord`---this code produces a plot of this model's predicted trajectories for each `onset` value, marginalizing over `tone` and `context`:
+
+```{r, eval = FALSE}
+ggemmeans(thai_m2, terms = c("t", "onset_ord")) %>% plot()
+```
+
+**Question 2**
+
+a.  Make a single plot showing predicted trajectories by `onset`, for each (pair of) values of `tone` and `context` (like one of the facet plots above).  It should also include SEs.^[Hint: you'll need something different from the `ggemmeans` command above.]
+
+b. Plot the difference curve, for the difference in predicted trajectories between `d` and `th`, for each pair of values of `tone` and `context`. 
+  * Try to get these plots in 6 panels of a single figure, rather than 6 plots printed vertically one after the other.
+
+c. What would you conclude about RQs 1-2, just based on these plots, plus the one immediately above (which used `ggemmeans()`)?
+
+
+
+
+
+
+
+## Part 2: GAMM
+
+Let's now consider by-speaker variability. This will motivate the random effects to add to model `thai_m1` to make a GAMM.
+
+### Exploratory analysis
+
+In terms of our model: to address RQs 1 and 3, I claim that we need to minimally include random-effect terms capturing the following:
+
+* Speaker variation in trajectory height
+* Speaker variation in trajectory shape
+* Speaker variation in differences in trajectory height and shape by `onset`
+
+(Note that this may not mean three distinct random-effect terms.)
+
+**Question 3**
+
+a. List the random-effect terms that need to be added to model `thai_m1` to capture these three types of speaker variation.
+
+a. Explain why each is necessary to address RQs 1 and 3.
+
+
+There are many other types of by-subject variation that could be accounted for in the model, but all are relevant for a secondary RQ (RQ 2) or for no RQ.  It is often not computationally feasible for GAMMs to build a "maximal" model with all possible random effects (as for a GLMM).  Instead, we make some plots to see if there are any other important sources of by-subject variation.
+
+**Question 4**
+
+a.  Make one or more plots visualizing by-subject variation in trajectories, as a function of `onset`, `context`, and `tone`.  
+  * To think about: should you examine one predictor at a time, or show them all varying on one plot? If the former, what do you do about the other predictors (e.g. `context`, `tone`) when plotting how the effect of another (e.g. `onset`) differs by subject
+
+The plot(s) should suggest at least inter-speaker differences in:
+
+  * Trajectory height and shape
+  * Differences in trajectory height and shape, by `onset`
+
+We've already decided that we're including  terms in the model below to account for these.
+
+b. Do your plot(s) suggest other large by-subject differences that we could account for? If so, which random-effect terms should be added to the model? If not, justify your answer.  (That is, why doesn't this matter for our research questions?)
+
+<!-- important to control for for the research questions?  Can you think of others which may matter, which should be checked by plotting in a more thorough analysis? -->
+
+### Model
+
+**Question 5**
+
+a. Fit GAMM model `thai_m2`, which is the same as `thai_m1` but with the random-effect terms added that were motivated in Questions 3--4.
+
+<!-- In terms of our model: because our primary RQ involves the effect of `onset`,  we'll at least need to include random-effect terms allowing speakers to differ in this effect.  This is also crucial to address RQ3. -->
+
+<!-- As the effects of `context` and `tone` are *secondary* RQs, it's less important to account for by-speaker variability, but you're welcome to do so if your answer to the exercise above suggests it's a good idea. -->
+
+b. 
+Print a summary of this model:
+
+```{r, eval = FALSE}
+summary(thai_m2)
+```
+
+### Interpretation
+  
+We can interpret the results of this GAMM visually (as in Question 2), and quantitatively.
+
+**Question 6**
+
+a. Repeat Question 2, for model `thai_m2`.   (I encourage you to compare the results to Question 2, but you don't need to write this up. `thai_m2` is a superior model.)
+
+b. Carry out a model comparison, or consider relevant row(s) of the model table, that answers RQ 1.  Briefly interpret the result (what does it mean, in words?). [1-2 sentences]
+
+c. Perform a hypothesis test, via model comparison, that addresses RQ3. Use this result, and your plot(s) from Question 4(a), to answer RQ3. [~2-3 sentences]
+
+
+
+
+  
+  
+  
+
+  

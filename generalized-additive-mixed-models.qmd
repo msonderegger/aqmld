@@ -1,0 +1,728 @@
+# Generalized additive mixed-effects models (GAMMs) {#sec-gamms}
+
+**This chapter was primarily written by Márton Sóskuthy**, with some editing and additions by Morgan Sonderegger. It covers topics from:
+
+-   @soskuthy2017generalised, pp. 9-19, 27-42
+-   @soskuthy2021evaluating, pp. 6-9, 18-20 (especially p. 19 recommendations)
+-   Noam Ross' [GAM course](https://noamross.github.io/gams-in-r-course/): Chap. 3
+
+It also refers to the "Day 1" slides from Sóskuthy's Dec. 2024 GAMMs workshop, available [here](https://osf.io/twn7m/).
+
+However, because this chapter's topics are mostly on the practical side, we'll be working primarily with this lab without accompanying slides. The tutorials by Sóskuthy and [by Martijn Wieiling](https://www.sciencedirect.com/science/article/abs/pii/S0095447017301377) provide excellent coverage of topics covered here.
+
+Topics:
+
+-   Generalized Additive Mixed-effects Models (GAMMs)
+
+## Preliminaries
+
+Load libraries we'll need. Most are the same as @sec-gams:
+
+```{r, message = FALSE}
+library(tidyverse)
+library(mgcv)
+library(itsadug)
+
+library(gratia)
+library(ggeffects)
+library(patchwork)
+```
+
+New library for today, which we'll use to expand our repertoire of plotting tools beyond itsadug (motivated in @sec-working-with-mgcv): gratia [@gratia].
+
+-   "Graceful ‘ggplot’-based graphics and utility functions for working with generalized additive models (GAMs) fitted using the ‘mgcv’ package."
+
+------------------------------------------------------------------------
+
+Import the `price_bin` data from last time, as well as two new versions of this data that we'll need below.
+
+```{r}
+price_bin <- readRDS(file = url("https://osf.io/download/vs6jk/"))
+pm_young <- readRDS(file = url("https://osf.io/download/xw7va/"))
+price_cont <- readRDS(file = url("https://osf.io/download/t3udn/"))
+## you can also download these files from Piazza, and
+## load them in from the current directory, e.g.
+# price_bin <- readRDS("price_bin.rds")
+```
+
+Re-do code from last chapter:
+
+-   Code new factor needed for a model with a difference smooth for `age`
+-   Fit a first model to the New Zealand diphthong data (`price_bin`) to determine `rho_est` for fitting an AR1 model next.
+
+```{r}
+## needed to fit a model with a difference smooth
+price_bin$age_o <- as.ordered(price_bin$age)
+contrasts(price_bin$age_o) <- "contr.treatment"
+
+## needed to fit the AR1 model
+price_bin <- price_bin %>%
+  group_by(id) %>%
+  mutate(traj_start=measurement_no == min(measurement_no)) %>%
+  ungroup()
+
+## model with difference smooth
+price_bin_gam <-
+  bam(
+    f2 ~ age_o +
+      s(measurement_no, bs = "cr", k = 11) +
+      s(measurement_no, bs = "cr", k = 11, by = age_o),
+    data = price_bin
+  )
+
+rho_est <- start_value_rho(price_bin_gam)
+```
+
+## Random effects
+
+**Important practical note: factors used in GAMM models for random effects need to be coded as factors.** Otherwise you'll get an opaque error, like
+
+```         
+Error in `names(dat) <- object$term`:! 'names' attribute [1] 
+must be the same length as the vector [0]". 
+```
+
+Try fitting this model:
+
+```{r, eval = FALSE}
+bam(f2 ~ age_o +
+      s(measurement_no, bs="cr", k=11) +
+      s(measurement_no, bs="cr", k=11, by=age_o) +
+      s(speaker, bs="re"),
+    data=price_bin,
+    AR.start=traj_start, rho=rho_est)
+```
+
+The issue is that `speaker` is by default coded as a *character vector* when the `price_bin` data was imported, rather than a factor. Because this is now the default behavior in R by functions for data import (e.g. `read.csv()`), this issue comes up often.
+
+Now: here's how you can specify the three different types of random effects in a GAMM, exemplified using the New Zealand diphthong data.
+
+### Random intercepts
+
+```{r}
+price_bin$speaker_f <- factor(price_bin$speaker)
+
+price_bin_gam_rint <- bam(f2 ~ age_o +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=age_o) +
+                       s(speaker_f, bs="re"),
+                     data=price_bin,
+                     AR.start=traj_start, rho=rho_est)
+```
+
+Predicted effect of `measurement_no` for each age group:
+
+```{r}
+plot_smooth(price_bin_gam_rint, view="measurement_no", plot_all="age_o", rm.ranef=T,print.summary = FALSE)
+```
+
+(Note the `print.summary` option here, to get rid of all the usual output that accompanies `plot_smooth()`.)
+
+### Random slopes
+
+Fit a model with by-speaker random intercepts and a *random slope* of `measurement_no`.
+
+```{r}
+price_bin_gam_rslope <- bam(f2 ~ age_o +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=age_o) +
+                       s(speaker_f, bs="re") + s(speaker_f, measurement_no, bs="re"),
+                     data=price_bin,
+                     AR.start=traj_start, rho=rho_est)
+```
+
+Predicted effect of `measurement_no` for each age group:
+
+```{r}
+plot_smooth(price_bin_gam_rslope, view="measurement_no", plot_all="age_o", rm.ranef=T)
+```
+
+**Important**: it is usually not a good idea to use random slopes instead of random smooths![^week7-1]
+
+[^week7-1]: To see why, compare the second and third by-speaker prediction plots below. Exceptions are when by-speaker differences are well-approximated as linear (= equivalent to random smooths), or it's computationally infeasible to include random smooths and you want to at least account for some by-speaker (etc.) variability in trajectory shape.
+
+However, you do often need random slope terms in GAMMs for parametric effects. These are equivalent to, and just as important as, random slope terms in GLMMS. For example, to allow the effect of `age_o` to differ by word, we'd include the term \`s(wordform, age_o, bs = 're').
+
+### Random smooths
+
+Fit a model with a by-speaker random smooth for `measurement_no`:
+
+```{r}
+price_bin_gam_rsmooth <- bam(f2 ~ age_o +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=age_o) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11),
+                     data=price_bin,
+                     AR.start=traj_start, rho=rho_est)
+```
+
+Predicted effect:
+
+```{r}
+plot_smooth(price_bin_gam_rsmooth, view="measurement_no", plot_all="age_o", rm.ranef=T)
+```
+
+This model takes a while to fit. There is a more efficient implementation of the `bam()` function that you can enable by setting the value of the `discrete` parameter to TRUE:
+
+```{r}
+price_bin_gam_rsmooth_2 <- bam(f2 ~ age_o +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=age_o) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11),
+                     data=price_bin,
+                     AR.start=traj_start, rho=rho_est,
+                     discrete=T)
+```
+
+```{r}
+plot_smooth(price_bin_gam_rsmooth_2, view="measurement_no", plot_all="age_o", rm.ranef=T)
+```
+
+Setting `discrete = TRUE` is usually a good approximation to the slower model fitted with the default (`discrete = FALSE`), but technically this should be checked before reporting your final model.
+
+Model summary:
+
+```{r}
+summary(price_bin_gam_rsmooth)
+```
+
+### By-speaker predictions
+
+Plots of the predicted `measurement_no` effect by speaker for each model, not accounting for `age_o`. This will give us a sense of what different random effect structures do.
+
+(To make these properly, the model predictions would ned to account for each speaker's age. I leave this as an exercise.)
+
+Random intercept:
+
+```{r}
+plot_smooth(price_bin_gam_rint, view = "measurement_no", 
+            cond = list(speaker_f = unique(price_bin$speaker_f)), 
+            plot_all = "speaker_f", 
+            rm.ranef = FALSE, se = 0, legend_plot = FALSE,
+            main = "Smooths of measurement_no by speaker")
+```
+
+Random intercept + slope:
+
+```{r}
+plot_smooth(price_bin_gam_rslope, view = "measurement_no", 
+            cond = list(speaker_f = unique(price_bin$speaker_f)), 
+            plot_all = "speaker_f", 
+            rm.ranef = FALSE, se = 0, legend_plot = FALSE,
+            main = "Smooths of measurement_no by speaker")
+```
+
+Random smooths:
+
+```{r}
+plot_smooth(price_bin_gam_rsmooth, view = "measurement_no", 
+            cond = list(speaker_f = unique(price_bin$speaker_f)), 
+            plot_all = "speaker_f", 
+            rm.ranef = FALSE, se = 0, legend_plot = FALSE,
+            main = "Smooths of measurement_no by speaker")
+```
+
+It can also be useful to inspect the random effects themselves. Here are just the random smooths, using `inspect_random()` from itsadug:
+
+```{r}
+inspect_random(price_bin_gam_rsmooth, select=3)
+```
+
+(select = 3 picks out the third smooth in the model -- you can find the correct number by counting from the top of the smooth estimates part of the model summary; the random smooths are the third smooth for this specific model.)
+
+### Comparison
+
+Here's what the predicted effect looks like for all five models:
+
+::: {#exr-gamm2-1}
+### Interpretation
+
+a.  Consider the three by-speaker prediction plots above. How do they differ?
+
+b.  How do these differences result from the three models' different random effect structures?
+
+c.  Consider the predicted `measurement_no` effect for the five models:
+
+```{r, echo = FALSE, message = FALSE}
+#| layout-ncol: 3
+
+plot_smooth(price_bin_gam, view="measurement_no", plot_all="age_o", rm.ranef=T, main = "no random effects", print.summary = FALSE )
+plot_smooth(price_bin_gam_rint, view="measurement_no", plot_all="age_o", rm.ranef=T, main = "random intercept", print.summary = FALSE )
+plot_smooth(price_bin_gam_rslope, view="measurement_no", plot_all="age_o", rm.ranef=T, main = "random slope", print.summary = FALSE )
+plot_smooth(price_bin_gam_rsmooth, view="measurement_no", plot_all="age_o", rm.ranef=T, main = "random smooth", print.summary = FALSE )
+plot_smooth(price_bin_gam_rsmooth_2, view="measurement_no", plot_all="age_o", rm.ranef=T, main = "random smooth (discrete)", print.summary = FALSE)
+```
+
+What differences do you see?
+
+d.  What do you think it means here that adding *any* random effect makes so much difference, but it doesn't matter much what kind of random effect?
+:::
+
+::: {#exr-gamm2-2}
+### Adding random smooths for previous / following environment
+
+There are two variables in the data set that code the previous and following phone. Here's what they look like:
+
+```{r}
+table(price_bin$previous)
+table(price_bin$following)
+```
+
+We typically use random effects for full words (or items / stimuli) rather than previous / following environment, but there are simply too many unique words in this data set, and specifying previous / following environments achieves essentially the same goal (see @rmld-book, Sec. 10.2.1 for explanation in the context of mixed-effects models). Your task is to set up separate random smooths for both and add them to your model.
+
+a.  Fit this model. (Remember: the grouping variable for random smooths must be a factor!)
+
+b.  Does this change affect your model output?
+
+c.  Use `inspect_smooth()` to look at the previous / following smooths. If you know a bit about phonetics: do these smooths look the way you'd expect them to?
+:::
+
+### Random reference-difference smooths
+
+@soskuthy2021evaluating points out that for $p$-values and SEs of smooths for an "average speaker" (or average word, etc.) to be correctly calculated, we need a random slope equivalent for the within-speaker following voiceless effect, i.e. a random effect that allows the shape of the following voiceless effect to vary within speakers. Sóskuthy calls this a "reference-difference smooth".
+
+This sounds complicated, but it's directly analagous to how we use random slopes in GLMMs. If we want a correct estimate of predictor $x$, which is a factor with two levels, and the effect of $x$ can (conceptually) vary between speakers, then we need a term that allows speakers to vary in this way---this is the by-speaker random slope of $x$.
+
+Add a reference-difference smooth to our example:
+
+```{r}
+price_bin$foll_v_o <- as.ordered(price_bin$following_voiceless)
+contrasts(price_bin$foll_v_o) <- "contr.treatment"
+
+price_bin_gam_fv_rs <- bam(f2 ~ foll_v_o +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=foll_v_o) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11) +
+                       s(measurement_no, speaker_f, by=foll_v_o, bs="fs", m=1, k=11),
+                     data=price_bin,
+                     AR.start=traj_start, rho=rho_est,
+                     discrete=T)
+```
+
+Model summary:
+
+```{r}
+summary(price_bin_gam_fv_rs)
+```
+
+And a plot of the two smooths.
+
+```{r}
+plot_smooth(price_bin_gam_fv_rs, view="measurement_no",
+            plot_all="foll_v_o", rm.ranef=T)
+```
+
+::: {.callout-tip collapse="true"}
+### Broader context
+
+You may notice something slightly odd about the plotted smooths: the confidence interval around the second one (following voiceless = TRUE) is a bit wider than the confidence interval around the first one. This is a known issue with plots of models with reference-difference smooths, which Morgan thinks is related to the fact that there are no correlations between different random-effect terms included in GAMMs (unlike GLMMs). Based on the simulations in @soskuthy2021evaluating, the model estimates *should* be OK -- so this is likely an issue with the prediction function for GAMMs.
+:::
+
+## Extended example: F1 in PRICE vs. MOUTH
+
+We now look at a data set that has F1 measurements for the PRICE and MOUTH vowels for 18 younger New Zealand English speakers. Here's what the data look like:
+
+```{r}
+ggplot(pm_young, aes(x=measurement_no, y=f1, col=vowel)) +
+  facet_wrap(~speaker, nrow=3) +
+  geom_line(aes(group=id), alpha=0.05) +
+  geom_smooth() +
+  xlab("% vowel duration") +
+  ylab("F1 (Hz)") +
+  scale_colour_manual(values=c("orange","purple")) +
+  scale_x_continuous(breaks=seq(20,80,30),
+                     labels=paste0(seq(20,80,30), "%")) +
+  theme(axis.text.x=element_text(size=14,angle=60, hjust=1),
+        strip.text=element_blank(),
+        panel.grid.major.y=element_line(linewidth=0.1, colour="grey"))
+```
+
+(Note again: these smoothers are GAMs!)
+
+Our goal is to find out whether the F1 trajectories for PRICE and MOUTH are reliably different. Traditional descriptions would have these vowels as /aI/ and /aU/ (I and U = lax i and u) -- but that's not what they look like due to changes that have occurred in NZE. Do those changes mean that the F1 trajectories are also now different (again, the traditional descriptions of /aI/ and /aU/ would imply essentially identical F1 trajectories).
+
+::: {#exr-gamm2-3}
+a.  Fit a GAMM to the F1 data that tests for differences between PRICE and MOUTH. The model should also have appropriate random effects and autocorrelation handling.
+
+b.  Once you have a model, use plotting and the model summaries to make sense of the results.
+
+c.  *Extra*: Make your model also account for by-word variability (each `wordform` has a unique value of `vowel`) using appropriate random effect terms. This model will take significantly longer to fit.[^week7-2]
+
+*Note*: This is an open ended task, and you'll have \~15 minutes to complete it (meaning, parts (a)--(b)). That's not a lot of time, but should be enough to get you started. Don't worry if you can't finish the exercise: we will work through it together. This exercise sets the scene for the discussion that will follow.
+:::
+
+[^week7-2]: *Hint*: this model should not contain an additional random smooth.
+
+::: {.callout-note collapse="true"}
+### Solution
+
+Data processing:
+
+```{r}
+pm_young$speaker_f <- factor(pm_young$speaker)
+pm_young$vowel_ord <- as.ordered(pm_young$vowel)
+contrasts(pm_young$vowel_ord) <- "contr.treatment"
+
+pm_young <- pm_young %>%
+  group_by(id) %>%
+  mutate(traj_start = measurement_no == min(measurement_no)) %>%
+  ungroup()
+```
+
+Fit model:
+
+```{r}
+# step 1: fit model to find autocorrelation at lag 1
+pm_gam_noAR <- bam(f1 ~ vowel_ord +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=vowel_ord) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11) +
+                       s(measurement_no, speaker_f, by=vowel_ord, bs="fs", m=1, k=11),
+                     data=pm_young,
+                     discrete=T)
+
+# step 2: find autocorrelation
+rho_est <- start_value_rho(pm_gam_noAR)
+
+# step 3: fit final model
+pm_gam_AR <- bam(f1 ~ vowel_ord +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=vowel_ord) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11) +
+                       s(measurement_no, speaker_f, by=vowel_ord, bs="fs", m=1, k=11),
+                 data=pm_young,
+                 AR.start=pm_young$traj_start, rho=rho_est,
+                 discrete=T)
+```
+
+Summary and visualization:
+
+```{r}
+summary(pm_gam_AR)
+plot_smooth(pm_gam_AR, view="measurement_no", plot_all="vowel_ord", rm.ranef=T)
+```
+:::
+
+## Significance testing in GAMMs
+
+So how do we know if we have a significant effect of vowel in this model? There are a few things we can do:
+
+1.  Look at the parametric difference term for `vowel_ord`; that will tell us about any height differences.
+2.  Look at the smooth difference term for `vowel_ord`; that will tell us about any shape differences.
+3.  Fit the model with a so-called binary difference term. That actually corresponds to a simultaneous test of height and shape, which is nice if we don't have separate predictions about those!
+4.  Perform a model comparison between models with and without all terms involving `vowel_ord`; that also corresponds to a simultaneous effect of height and shape, and takes by-speaker differences into account.
+5.  Look at the difference smooth & associated confidence interval.
+
+Here's option (3):
+
+```{r}
+pm_young$vowel_bin <- as.numeric(pm_young$vowel == "price")
+
+pm_gam_bin_AR <- bam(f1 ~ s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=vowel_bin) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11) +
+                       s(measurement_no, speaker_f, by=vowel_bin, bs="fs", m=1, k=11),
+                 data=pm_young,
+                 AR.start=pm_young$traj_start, rho=rho_est,
+                 discrete=T)
+
+summary(pm_gam_bin_AR)
+plot_smooth(pm_gam_bin_AR, view="measurement_no", plot_all="vowel_bin", rm.ranef=T)
+```
+
+Note that the predictions from this model are *identical* to those from the one with a separate parametric / smooth difference term. It's only the way that this information is presented that's different.
+
+Option (4):
+
+```{r}
+## model without any vowel information
+pm_gam_bin_AR_1 <- bam(f1 ~ s(measurement_no, bs="cr", k=11) +
+                         s(measurement_no, speaker_f, bs="fs", m=1, k=11),
+                     data=pm_young,
+                     AR.start=pm_young$traj_start, rho=rho_est,
+                     discrete=T)
+
+compareML(pm_gam_bin_AR_1, pm_gam_bin_AR)
+```
+
+Option (5) (looking at difference smooth):
+
+```{r}
+plot_smooth(pm_gam_AR, view="measurement_no", plot_all="vowel_ord", rm.ranef=T)
+plot_diff(pm_gam_AR, view="measurement_no", comp=list(vowel_ord=c("mouth","price")), rm.ranef=T)
+```
+
+::: {#exr-gamm2-4}
+Consider the model `price_bin_gam_fv` from @exr-gamm1-2.
+
+a.  Perform two significance tests to assess the effects of `age_o` and `foll_v`, using one of options (1)-(4) from above.
+
+b.  Which predictor has a larger effect? (Or, if this isn't possible to answer, explain why not.)
+:::
+
+```{r}
+price_bin_gam_fv <-
+  bam(
+    f2 ~ foll_v_o + age_o +
+      s(measurement_no, bs = "cr", k = 11) +
+      s(measurement_no, bs = "cr", k = 11, by = age_o) +
+      s(measurement_no, bs = "cr", k = 11, by = foll_v_o),
+    data = price_bin, method = "ML"
+  )
+
+price_bin_gam_fv_no_age <-
+  bam(
+    f2 ~ foll_v_o + 
+      s(measurement_no, bs = "cr", k = 11) +
+      s(measurement_no, bs = "cr", k = 11, by = foll_v_o),
+    data = price_bin, method = "ML"
+  )
+
+price_bin_gam_fv_no_fv <-
+  bam(
+    f2 ~  age_o +
+      s(measurement_no, bs = "cr", k = 11) +
+      s(measurement_no, bs = "cr", k = 11, by = age_o) +
+      s(measurement_no, bs = "cr", k = 11, by = foll_v_o),
+    data = price_bin, method = "ML"
+  )
+
+compareML(price_bin_gam_fv, price_bin_gam_fv_no_age)
+```
+
+### Working with interactions
+
+In this section, we return to the question of how age affects the F2 trajectory for PRICE. Previously, we tackled this issue by comparing an older and a younger group. We now turn to a continuous measure of age, i.e. year of birth (yob). But how can we test such a variable? The solution to this issue is the GAM(M) version of interactions: tensor product smooths. An interaction in a conventional regression model basically asks the following question: does variable A (e.g. age) change the effect of variable B (e.g. measurement time)? In a conventional regression model with an interaction between A and B, the slope associated with variable B can change as the value of variable A changes.
+
+A tensor product smooths implements the same idea for smooths: the non-linear effect of variable B changes as the value of variable A changes (also non-linearly). There are three basic ways to implement this in GAM(M) formulas:
+
+-   `s(A, B)`: *2D smooth*, suitable when A and B are on similar scales (e.g. latitude & longitude)
+    -   This is not commonly the case for (non-spatal) linguistic data, so tutorials for linguists tend to just consider the "tensor product" case.
+    -   In this case, you do not need to include independent smooths `s(A)` or `s(B)`. This makes intuitive sense if you think of the spatial case---what is the meaning of "the smooth of latitude \[alone\]"?
+-   `te(A, B)`: *tensor product* or *tensor smooth*, doesn't assume that A and B are on similar scales.
+    -   Pro: simplicity, requires less data than tensor interaction
+    -   Disadvantage: doesn't separate the "interaction" of A and B from their "main effects", which is sometimes useful.
+-   `s(A) + s(B) + ti(A, B)`: *tensor interaction* or *ANOVA decomposition*
+    -   Pro: Decomposes "main effect" versus "interaction"
+    -   Con: Requires more data, interpretation can get tricky when A and B participate in other terms.
+
+What a 2D smooth means will be easier to appreciate once we look at some plots, so let's move on for now.
+
+Here's a preliminary look at the data. The darker colours indicate speakers born in earlier decades; the range of years of birth spans 1900 to 1980. Note that this visualisation doesn't tell us all that much -- it's hard to interpret it!
+
+```{r}
+ggplot(price_cont, aes(x=measurement_no, y=f2, col=decade)) +
+  facet_wrap(~speaker_ord, nrow=4) +
+  geom_line(aes(group=id), alpha=0.1) +
+  geom_smooth() +
+  xlab("% vowel duration") +
+  ylab("F2 (Hz)") +
+  #scale_colour_manual(values=c("orange","purple"), guide="none") +
+  scale_x_continuous(breaks=seq(20,80,30),
+                     labels=paste0(seq(20,80,30), "%")) +
+  theme(axis.text.x=element_text(size=14,angle=60, hjust=1),
+        strip.text=element_blank(),
+        panel.grid.major.y=element_line(size=0.1, colour="grey"))
+```
+
+Here's the model that we fit to this data. Here we've used the "tensor interaction" form:
+
+-   Smooths of `measurement_no` and `yob` measure their simple effects (or "average", "marginal" effects)
+-   The `ti()` term is the tensor product smooth, i.e. the non-linear interaction term which measures the joint effect of `measurement_no` and `yob` *beyond* the simple effects.
+
+```{r}
+price_cont$speaker_f <- factor(price_cont$speaker)
+price_cont <- price_cont %>%
+  group_by(id) %>%
+  mutate(traj_start = measurement_no == min(measurement_no)) %>%
+  ungroup()
+
+price_cont_gam <- 
+  bam(f2 ~
+        s(measurement_no, bs="cr", k=11) +
+        s(yob, bs="cr", k=11) +
+        ti(measurement_no, yob, bs="cr", k=c(11,11)) +
+        s(measurement_no, speaker_f, bs="fs", m=1, k=11),
+      data=price_cont,
+      AR.start=price_cont$traj_start, rho=0.7,
+      discrete=T)
+
+summary(price_cont_gam)
+```
+
+The model summary suggests that there is no significant effect of year of birth alone; this means that year of birth does not make the F2 trajectory as a whole significantly lower or higher (averaging over `measurement_no`). However, the interaction is significant, suggesting that the shape of the trajectory changes with the year of birth of the speaker.
+
+So what does this interaction look like? Let's create some plots that show us how the F2 trajectory changes as a function of decade of birth in our data. Here's how to do this with `plot_smooth()` from itsadug (a bit clunky)
+
+```{r}
+#| layout-ncol: 2
+
+for (n in 0:4) {
+plot_smooth(price_cont_gam, view="measurement_no",
+            cond=list(yob=1905 + n * 17.5), rm.ranef=T, se=FALSE, 
+            lw=2, ylim=c(1300,1750), n=100, 
+            main=paste0("year of birth: ", 1905 + n * 17.5))
+}
+```
+
+Here is a simpler way to do this using `ggpredict()` (from ggeffects, see @sec-working-with-mgcv):
+
+```{r, eval = FALSE}
+ggpredict(price_cont_gam, terms = c("measurement_no", "yob [1900, 1920, 1940, 1960, 1980]")) %>% plot(show_ci = FALSE)
+```
+
+Basically, the trajectory lower and changes shape over time (as `yob` increases).
+
+A less intuitive, but often-used visualisation shows this as a *heat map*. Opinions differ on whether heat maps are:
+
+-   A natural way to visualize 2D smooths that you should learn to read (Morgan)
+-   A confusing way that should not be used in situations other than where the two axes have a straightforward spatial interpretation (e.g. for map data, where one axis is longitude and the other one latitude). (Márton)
+
+Generate a heatmap using `fvisgam()` from itsadug, along with two plots of "slices" of the heatmap to aid interpretation:
+
+```{r}
+layout(mat=matrix(c(1,1,2,3), ncol=2))
+fvisgam(price_cont_gam, view=c("measurement_no","yob"), rm.ranef=T)
+abline(h=1910, lty=2, lwd=2)
+abline(h=1965, lty=2, lwd=2)
+par(mar=c(2.1,4.1,3.1,2.1))
+plot_smooth(price_cont_gam, view="measurement_no",
+            cond=list(yob=1965), rm.ranef=T, se=FALSE,
+            lw=2, ylim=c(1300,1750), n=100)
+text(10, 1700, "year of birth: 1965", adj=0)
+par(mar=c(5.1,4.1,0.1,2.1))
+plot_smooth(price_cont_gam, view="measurement_no",
+            cond=list(yob=1910), rm.ranef=T, se=FALSE,
+            lw=2, ylim=c(1300,1750), n=100)
+text(10, 1700, "year of birth: 1910", adj=0)
+```
+
+This plot shows predicted f2 as `yob` and `measurement_no` are varied. This is not the same as showing just the `ti(yob, measurement_no)` effect, which would look like this (using `draw()` from gratia):
+
+```{r}
+draw(price_cont_gam, select = 3, contour = FALSE)
+```
+
+Note that the interaction looks a little "jittery" when looked at in its entirety. This is likely the same kind of artefact that we've seen before for the global warming data where a period of rapid change makes periods of stability look more wiggly than they should. An adaptive smoother could potentially help:
+
+```{r}
+price_cont_gam <- 
+  bam(f2 ~
+        s(measurement_no, bs="cr", k=11) +
+        s(yob, bs="ad", k=11) +
+        ti(measurement_no, yob, bs="cr") +
+        s(measurement_no, speaker_f, bs="fs", m=1, k=11),
+      data=price_cont,
+      AR.start=price_cont$traj_start, rho=0.7,
+      discrete=T)
+
+layout(mat=matrix(c(1,1,2,3), ncol=2))
+fvisgam(price_cont_gam, view=c("measurement_no","yob"), rm.ranef=T)
+abline(h=1910, lty=2, lwd=2)
+abline(h=1965, lty=2, lwd=2)
+par(mar=c(2.1,4.1,3.1,2.1))
+plot_smooth(price_cont_gam, view="measurement_no",
+            cond=list(yob=1965), rm.ranef=T, se=FALSE,
+            lw=2, ylim=c(1300,1750), n=100)
+text(10, 1700, "year of birth: 1965", adj=0)
+par(mar=c(5.1,4.1,0.1,2.1))
+plot_smooth(price_cont_gam, view="measurement_no",
+            cond=list(yob=1910), rm.ranef=T, se=FALSE,
+            lw=2, ylim=c(1300,1750), n=100)
+text(10, 1700, "year of birth: 1910", adj=0)
+```
+
+::: {#exr-gamm2-5}
+a.  For the `english` data from languageR (introduced in @sec-bb2-normal): fit a GAM of `RTlexdec` including:
+
+-   a 2D smooth coded using `te` (not `ti`) of `WrittenFrequency` and `Familiarity`
+-   a parametric term for `AgeSubject`.
+
+Recall that `WrittenFrequency` and `Familiarity` are highly correlated.
+
+b.  Visualize the 2D smooth as a heatmap using `fvisgam()`
+
+c.  Do the same using `draw()` from gratia.
+
+d.  How do these visualizations differ? In particular, what does the blank space on the `draw()` heatmap mean?
+
+e.  Does one heatmap seem preferable, given what the data looks like?
+
+For (c) and (d), you may need to read documentation or search online / ask a chatbot (and verify its answer).
+:::
+
+### Extra: Custom plots & videos for GAMMs
+
+It's often useful to create visualizations showing how trajectory shapes change as a function of another variable. This example shows how, more generally, you can use animation to visualize effects from GAMMs.
+
+<!-- I will show you two ways to create more customised plots for GAMMs. These look a thousand times more professional than the plots you can generate automatically, and you can format them using the well-documented and flexible plotting package ggplot2. -->
+
+First, we will create a series of four plots showing how trajectory shapes change as a function of year of birth (i.e., four "frames" from an animation). Second, we will show the same change as an animation.
+
+For both options, we need to generate *model predictions*. For this, we first design a data frame that has the same form as the original data, with all the predictors used in our model. Once we have this data frame (called `newdat` here), generating the actual predictions is really straightforward. For our data frame, we'll use four levels of year of birth as set out above.
+
+```{r}
+newdat <- expand.grid(
+  measurement_no=0:100,
+  yob=c(1905, 1930, 1950, 1975),
+  speaker_f=levels(price_cont$speaker_f)[1]
+)
+
+preds <- predict(price_cont_gam, newdat,
+                 exclude=c("s(measurement_no,speaker_f)"),
+                 se.fit=T)
+newdat$f2 <- preds$fit
+newdat$ll <- preds$fit - 1.96*preds$se.fit
+newdat$ul <- preds$fit + 1.96*preds$se.fit
+```
+
+This data set now has everything we need for our plot! We'll use ggplot() to create the plot.
+
+```{r, fig.height=1,fig.width=4}
+ggplot(newdat, aes(x=measurement_no,y=f2)) +
+  facet_wrap(~yob, ncol=4)+
+  geom_ribbon(aes(ymin=ll,ymax=ul), col=NA, fill="grey", alpha=0.5) +
+  geom_line() +
+  xlab("% vowel duration") +
+  ylab("F2 (Hz)") +
+  theme_minimal() +
+  theme(axis.line=element_line(),
+        panel.grid=element_blank())
+```
+
+The second option is to use gganimate and create an animation for the whole time period (1900--1980). The first step (creating newdat) is actually ludicrously simple! Instead of creating 4 time slices, we create 81, all the way from 1900 to 1980.
+
+```{r}
+newdat <- expand.grid(
+  measurement_no=0:100,
+  yob=1900:1980,
+  speaker_f=levels(price_cont$speaker_f)[1]
+)
+preds <- predict(price_cont_gam, newdat,
+                 exclude="s(measurement_no,speaker_f)",
+                 se.fit=T)
+newdat$f2 <- preds$fit
+newdat$ll <- preds$fit - 1.96*preds$se.fit
+newdat$ul <- preds$fit + 1.96*preds$se.fit
+```
+
+This data set now has everything we need for our plot! We'll use ggplot() to create the plot. (This won't render in HTML, but copy the code into your RStudio to see the animation.)
+
+```{r, eval = FALSE}
+library(gganimate)
+vid <- ggplot(newdat, aes(x=measurement_no,y=f2)) +
+  transition_time(yob) +
+  ease_aes('linear') +
+  labs(title = 'Year of birth: {frame_time}') +
+  geom_ribbon(aes(ymin=ll,ymax=ul), col=NA, fill="grey", alpha=0.2) +
+  geom_line(lwd=2) +
+  xlab("% vowel duration") +
+  ylab("F2 (Hz)") +
+  theme_minimal() + #
+  theme(axis.line=element_line(),
+        panel.grid=element_blank(),
+        axis.text=element_text(size=18, colour="black"),
+        axis.title=element_text(size=18, face="bold"),
+        plot.title=element_text(size=18, face="bold"))
+animate(vid, nframes=81, fps=12, width=600, height=450)
+```

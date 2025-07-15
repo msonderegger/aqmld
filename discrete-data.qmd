@@ -1,0 +1,1235 @@
+# Models for discrete data: counts, scales, and frequencies {#sec-dd-1}
+
+These lecture notes cover topics from:
+
+-   @winter2021poisson, especially Sec. 3.3 on
+-   @mcelreath2020statistical and @kurz2021statistical: Sec. 12.3
+-   @levshina2015linguistics, 13.1-13.2.2
+
+The @winter2021poisson reading builds on @sec-bb2-poisson, @sec-bb2-nb on Poisson and negative binomial regression. The @levshina2015linguistics reading covers *frequentist* multinomial regression, briefly but clearly. I wasn't able to find a sufficiently short and clear source for Bayesian multinomial regression. Readings covering the topic in more detail are @barreda2023bayesian Sec. 12.2, or @mcelreath2020statistical and @kurz2021statistical Sec. 11.3.
+
+Topics:
+
+-   Poisson and negative binomial regression
+    -   Offsets, random effects
+-   Ordinal regression
+-   Multinomial regression
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE, cache=FALSE}
+library(brms)
+library(lme4)
+library(arm)
+library(tidyverse)
+
+library(tidybayes)
+library(bayestestR)
+
+library(bayesplot)
+library(loo)
+library(modelr)
+library(languageR)
+
+library(emmeans)
+library(broom.mixed)
+
+library(mlogit)
+
+## needed for cut2()
+library(Hmisc)
+
+library(patchwork)
+
+# avoids bug where select from MASS is used
+select <- dplyr::select
+```
+
+::: {.callout-tip collapse="true"}
+### Practical notes
+
+1.  If you have loaded `rethinking`, you need to detach it before using brms. See @kurz2021statistical Sec. 4.3.1.
+
+2.  I use the `file` argument when fitting `brms` models to make compiling this document easier (so the models don't refit every time I compile). You may or may not want to do this for your own models. See `file` and `file_refit` arguments in `?brm`.
+
+3.  Here I set the `file_refit` option so "brms will refit the model if model, data or algorithm as passed to Stan differ from what is stored in the file."
+
+```{r}
+options(brms.file_refit = "on_change")
+```
+
+4.  I use `chains = 4, cores = 4` when fitting `brm` models below---this means 4 chains, each to be run on one core on my laptop. `cores = 4` may need to be adjusted for your computer. (You may have fewer or more cores; I have 8 cores, so this leaves 50% free.) **You should figure out how to use multiple cores on your machine**.
+
+5.  Make numbers be printed only to 3 digits, for neater output:
+
+```{r}
+options(digits = 3)
+```
+:::
+
+## Data
+
+### Dyads {#sec-dd1-dyads}
+
+Load the dyads dataset discussed in @winter2021poisson, which we used in @sec-bb2:[^discrete-data-1]
+
+[^discrete-data-1]: I found their [OSF project](https://osf.io/ugpfd/) helpful, especially the [Rmd file](https://osf.io/eaxk7/) showing code.
+
+```{r}
+dyads <- read.csv("https://osf.io/6j8kc/download", stringsAsFactors = TRUE)
+```
+
+The structure of the data is described in @sec-bb2-prelim, including descriptions of relevant columns.
+
+<!-- * "There are two data points per participant, one from the friend condition, and one from the professor condition. The `ID` column lists participant identifiers for all 27 participants (14 Catalan speakers and 13 Korean speakers). The `gestures` column contains the primary response variable that we are trying to model, the number of gestures observed on each trial. The `context` predictor specifies the social context that was experimentally manipulated." -->
+
+<!-- Relevant columns: -->
+
+<!-- * `ID`: participant -->
+
+<!-- * `context`: friend vs. professor -->
+
+<!--   * varies within-participant (2 observations per partiicpant) -->
+
+<!-- * `language`: Catalan, Korean -->
+
+<!--   * participant-level predictor -->
+
+<!-- * `gender`: F, M -->
+
+<!--   * participant-level predictor -->
+
+<!-- *  `gestures`: gesture count -->
+
+<!--   * response variable -->
+
+<!-- * `dur`: duration of encounter -->
+
+We'll assume below that the **research questions** are:
+
+1.  Do participants gesture more with professors than with friends?
+2.  Does this effect differ between Catalan and Korean speakers?
+
+Thus, these effects are of interest for the RQs:
+
+-   `context`, `language`, `context`:`language`
+
+All predictors are two-level factors. Transform to numeric and center:
+
+```{r}
+dyads <- dyads %>% mutate(
+  context_prof = rescale(context),
+  gender_M = arm::rescale(gender),
+  language_K = arm::rescale(language)
+)
+```
+
+Empirical effects:
+
+```{r}
+#| code-fold: true
+
+dyads %>% ggplot(aes(x = language, y = gestures / dur)) +
+  geom_boxplot(aes(color = context)) +
+  xlab("Context") +
+  ylab("Gestures") +
+  scale_y_log10() +
+  annotation_logticks(sides = "l")
+```
+
+Note:
+
+-   We plot the *rate* gestures/second: `gestures` divided by `dur`.
+-   The $y$-axis is on a log scale.
+
+Both correspond to the Poisson model we will fit, which models log counts (`log(gestures)`) using an offset for `log(dur)`.
+
+### Dutch verb etymology
+
+`etymology` from the languageR package. This is a dataset of "Estimated etymological age for regular and irregular monomorphemic Dutch verbs, together with other distributional predictors of regularity", from `languageR`. The data is originally from @tabak2005lexical, and is analyzed in @baayen2008ald 6.3.2.
+
+Variables of interest:
+
+-   Response: `EtymAge` -- how old a (Dutch) verb is, described as the age of the set of languages it shows up in (as a cognate)
+    -   *Dutch* $<$ *DutchGerman* $<$ *WestGermanic* $<$ *Germanic* $<$ *IndoEuropean*
+-   Predictors:
+    -   `Regularity`: levels *irregular*, *regular* (0, 1)
+    -   `WrittenFrequency`: centered
+    -   `NcountStem`: centered
+
+Preprocessing:
+
+```{r}
+etymology <- etymology %>%
+  mutate(
+    ## make EtymAge an ordered factor
+    EtymAge = ordered(
+      EtymAge,
+      levels = c("Dutch", "DutchGerman", "WestGermanic", "Germanic", "IndoEuropean")
+    ),
+    ## Center continous vars
+    WrittenFrequency = scale(WrittenFrequency, scale = FALSE),
+    ## Center WrittenFrequency
+    NcountStem = scale(NcountStem, scale = FALSE),
+    ## Center and scale Regularity
+    Regularity.std = arm::rescale(Regularity),
+  )
+
+contrasts(etymology$Regularity) <- contr.helmert
+```
+
+Different ways to visualize empirical effects for ordinal data:
+
+```{r}
+#| code-fold: true
+
+p1 <- etymology %>% ggplot(aes(x = EtymAge, y = WrittenFrequency)) +
+  geom_boxplot() +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+
+p2 <- etymology %>% ggplot(aes(y = EtymAge, x = NcountStem)) +
+  geom_boxplot()
+
+p1 + p2
+
+# histograms
+etymology %>% ggplot(aes(x = EtymAge)) +
+  geom_histogram(stat = "count", aes(color = Regularity, fill = Regularity), position = "dodge")
+
+# histogram by quantile of NcountStem
+etymology %>% ggplot(aes(x = EtymAge)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~ cut2(NcountStem, g = 5)) +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+
+
+# proportions
+p3 <- etymology %>% ggplot(aes(x = EtymAge, fill = Regularity)) +
+  geom_bar(position = "fill") +
+  theme(legend.position = "bottom") +
+  scale_x_discrete(guide = guide_axis(angle = 90))
+
+
+
+# Empirical CDF: requires converting EtymAge to numeric
+p4 <- ggplot(etymology, aes(x = as.numeric(EtymAge))) +
+  stat_ecdf(geom = "step", aes(color = Regularity)) +
+  xlab("EtymAge") +
+  theme(legend.position = "bottom")
+
+
+p3 + p4
+```
+
+It seems like lower frequency, lower neighborhood density (`NcountStem`), and being regular are associated with a verb being younger (closer to *Dutch*).
+
+### Idioms
+
+This data is originally from @reddy2011empirical, a study of what factors influence perception of \`how literal' a compound noun is (like "smoking jacket", "cutting edge").[^discrete-data-2] Traditionally compounds are classified as "idioms" or "compositional", but in reality this is a fuzzy boundary.
+
+[^discrete-data-2]: I thank Siva Reddy for posting this data, and [Michaela Socolof](https://michaelasocolof.github.io/) for providing a cleaned-up version with word frequency information added. This dataset was analyzed for her LING 620 project.
+
+The compounds can be roughly thought of as three types (column `literal_meaning`):
+
+1.  *yes* -- compound has a literal as well as idiomatic meaning ("melting pot")
+2.  *no* -- compound does not have a (plausible) literal meanng ("front runner")
+3.  *none* -- compound only has a literal meaning ("credit card")
+
+Important columns, after processing done below:
+
+-   `participant`: 151 participants
+-   `score`: rating (1-6 scale) given by participant to this $N_1$-$N_2$ compound noun.
+-   `freq_word_1`: frequency (log-transformed) of $N_1$
+-   `freq_word_2`: frequency (log-transformed) of $N_2$
+-   `freq_word_3`: frequency (log-transformed) of $N_1$+$N_2$ compound
+-   `word`: the $N_1$+$N_2$ compound (90 compounds)
+-   `literal_meaning`: see above (factor with 3 levels)
+
+```{r}
+idioms <- read.csv("idioms_reddy.csv", stringsAsFactors = TRUE)
+```
+
+Let's assume the research questions are:
+
+-   Do the frequencies of the individual nouns (`freq_word_1`, `freq_word_2`) affect `score`?
+-   Does the frequency of the N+N compound (`freq_compound`) affect `score`?
+
+Some processing:
+
+```{r}
+## add 0.1 to all frequencies to avoid zero counts
+## log-transform then standardize each frequency measure
+
+## change score to 1-6 ordinal scale
+idioms <- idioms %>% mutate(
+  freq_word_1 = arm::rescale(log(Word1_freq + 0.1)),
+  freq_word_2 = arm::rescale(log(Word2_freq + 0.1)),
+  freq_compound = arm::rescale(log(Cpd_freq + 0.1)),
+  participant = as.factor(as.numeric(str_match(participant, "[0-9]+"))),
+  score = ordered(score + 1)
+)
+
+## Remove ratings for N1 and N2 so we only have compound word ratings!
+## The full dataset also has ratings of how literal N1 and N2 are.
+idioms <- idioms %>%
+  filter(!str_detect(word, "_[0-9]")) %>%
+  droplevels()
+
+## helmert coding for the 3-level factor
+contrasts(idioms$literal_meaning) <- contr.helmert
+```
+
+#### Data cleaning
+
+This data comes from Amazon Mechanical Turk, and is messy---not all participants are alike. There are 90 compounds, but most participants didn't rate all compounds. Also, many participants didn't use the whole 1-6 scale (e.g. just 2, 4, 6; or always chose 3). Let's consider just those who rated at least 30 compounds and used the whole scale, as an approximation of "OK participant":
+
+```{r}
+## partic who use the whole scale
+p1 <- idioms %>%
+  group_by(participant) %>%
+  count(score) %>%
+  dplyr::summarize(ct = n()) %>%
+  filter(ct == 6) %>%
+  pull(participant) %>%
+  as.character()
+
+## partic who rated at least 30 words
+p2 <- names(which(xtabs(~participant, idioms) > 30))
+
+good_participants <- intersect(p1, p2)
+
+idioms <- idioms %>% filter(participant %in% good_participants)
+```
+
+There are `r length(good_participants)` OK participants.
+
+Basic empirical effects:
+
+```{r}
+#| code-fold: true
+
+idioms %>% ggplot(aes(x = score, y = freq_word_1)) +
+  geom_boxplot() +
+  ylab("Word 1 frequency")
+
+idioms %>% ggplot(aes(x = score, y = freq_word_2)) +
+  geom_boxplot() +
+  ylab("Word 2 frequency")
+
+idioms %>% ggplot(aes(x = score, y = freq_compound)) +
+  geom_boxplot() +
+  ylab("Compound frequency")
+
+idioms %>% ggplot(aes(x = score)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~literal_meaning, scale = "free_y")
+```
+
+Response pattern by participant:
+
+```{r}
+#| code-fold: true
+
+idioms %>% ggplot(aes(x = score)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~participant, scales = "free_y") +
+  ggtitle("Participants")
+```
+
+Pattern by word, for the first 30 N-N compounds:
+
+```{r}
+#| code-fold: true
+
+idioms %>%
+  filter(word %in% unique(idioms$word)[1:30]) %>%
+  ggplot(aes(x = score)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~word, scales = "free_y") +
+  ggtitle("Compounds")
+```
+
+It looks like participants differ in their response patterns. Note in particular how some participants have "wider" distribtions (like 191), suggesting that participants differ not just in the "intercept" but the "variance" of the distribution.
+
+Words (= N+N compounds) also differ in their response patterns, but in a simpler way. The whole distribution is shifted more left or right; it's not as clear that its "variance" differs by-word.
+
+### Dutch verb `regularity`
+
+This is a dataset on Dutch verb regularity from `languageR`. Preprocessing:
+
+```{r}
+## relevel Auxiliary to intuitive order,
+## center WrittenFrequency
+##  make a numeric + centered version of Regularity:
+
+regularity <- regularity %>% mutate(
+  Auxiliary = fct_relevel(regularity$Auxiliary, "hebben", "zijnheb"),
+  WrittenFrequency = scale(WrittenFrequency, scale = FALSE),
+  Regularity.num = arm::rescale(Regularity)
+)
+```
+
+We'll assume:
+
+-   Response: `Auxiliary` (3 levels)
+-   Predictors: `Regularity`, `WrittenFrequency`
+
+Intuitively: "default" auxiliary (*hebben*) associated with lower `frequency` and regular verbs (`Regularity`).
+
+```{r}
+p1 <- regularity %>% ggplot(aes(y = WrittenFrequency, x = Auxiliary)) +
+  geom_boxplot()
+p2 <- regularity %>% ggplot(aes(x = Auxiliary, y = as.numeric(Regularity) - 1)) +
+  stat_summary(fun.data = "mean_cl_boot") +
+  ylab("Proportion Regularity=regular") +
+  ylim(0, 1)
+p1 + p2
+```
+
+## Poisson and negative binomial mixed-effects models
+
+### Poisson {#sec-dd1-poisson}
+
+We would like to fit a mixed-effects model for the `dyads` data testing the RQs above. See below for the model formula.
+
+We would like to fit a mixed-effects model testing the RQs above. This is similar to @exr-brm1-extra-poisson, but:
+
+-   Including random effects
+-   Including an `offset` term
+
+Both better reflect the structure of this data.
+
+To choose weakly informative priors, let's consider the range of the data, after accounting for the `offset`:
+
+```{r}
+#| code-fold: true
+
+range(log(dyads$gestures) - log(dyads$dur))
+
+dyads %>% ggplot(aes(x = log(gestures) - log(dur))) +
+  geom_histogram() +
+  xlab("Log(gestures) - offset")
+```
+
+Let's do:
+
+-   Intercept: $\beta_0 \sim N(-1, 0.5)$
+    -   Chosen so that mean +- 3 SD covers about the range of the data.
+
+On log scale, 1 would be a very large effect, corresponding to multiplying `gestures` by exp(1) = 2.7, so let's choose a regularizing prior s.t. 3 SD is 1:
+
+-   $\beta_i$ slopes: $\beta_i \sim N(0, 0.33)$
+
+Random effects: reasonable scales, given priors we've chosen above, are 0.5 and 0.33 for slope/intercept. Let's use 0.5 to be more conservative (flatter prior):
+
+-   Random effect variances: $\sigma_i \sim \text{Exponential}(2)$ = 1/0.5
+-   Random effect correlations: $LKJ(2)$
+
+We use an offset term, `log(dur)`. <!-- That messes up intercepts above, have to change prior. -->
+
+Following the tutorial, I'll increase the `iter`/`warmup` values from their defaults.
+
+```{r}
+dyads_m12_1 <- brm(
+  gestures ~ 1 + context_prof * language_K + gender_M +
+    offset(log(dur)) +
+    (1 + context_prof | ID),
+  data = dyads, family = poisson,
+  prior = c(
+    prior(normal(-1, 0.5), class = Intercept), # beta_0
+    prior(normal(0, 0.33), class = b),
+    prior(exponential(2), class = sd), # random-effect SDs
+    prior(lkj(2), class = cor)
+  ),
+  iter = 8000, warmup = 4000, chains = 4, cores = 4,
+  file = "models/dyads_m12_1.brm"
+)
+```
+
+```{r}
+summary(dyads_m12_1)
+```
+
+::: {#exr-dd1-1}
+a.  Consider the output of `dyads_m12_1`. Two rows of the regression table address RQ1 and RQ2. Which rows?
+
+b.  Calculate Bayes Factors, using `bf_pointnull`, for the model. What do the BFs, together with the 95% CredI's from the model output for the two rows, say about RQ1 and RQ2?
+
+c.  Calculate the 95% CredI's for the `context` effect when `language`=korean and when `language`=catalan. (You could use functionality from `emmeans` or `brms::hypothesis`, as demonstrated in the tutorial.). Does this change your interpretation from part (a)?
+
+Code for calculating the posteriors for these effects the easy way with emmeans\`, and "by hand" the harder way (but more nicely visualized), is commented-out.
+
+<!-- The easy way: -->
+
+<!-- ```{r} -->
+
+<!-- pairs(emmeans(dyads_m12_1, ~ context_prof | language_K)) -->
+
+<!-- ``` -->
+
+<!-- ```{r, eval = FALSE} -->
+
+<!-- ## draw predictionc -->
+
+<!--  dyads %>% data_grid(context_prof, language_K, dur=mean(dur), gender_M=0) %>% add_epred_draws(dyads_m12_1, re_formula = NA, ndraws = 1000)  -> pred_df -->
+
+<!-- ## change context, language to factors, for plotting -->
+
+<!-- pred_df <- pred_df %>% mutate(context=factor(context_prof), language=factor(language_K)) -->
+
+<!-- levels(pred_df$context) <- levels(dyads$context) -->
+
+<!-- levels(pred_df$language) <- levels(dyads$language) -->
+
+<!-- ## make plot of posterior -->
+
+<!-- pred_df %>% pivot_wider(id_cols = c(.draw, language), names_from = c(context), values_from =.epred) %>% -->
+
+<!--   mutate(diff = friend-prof) %>% -->
+
+<!--   ggplot(aes(x = diff, y=language)) + -->
+
+<!--   stat_slab() + geom_vline(aes(xintercept=0), lty=2) + xlab("Predicted prof/friend difference (counts)") -->
+
+<!-- ``` -->
+:::
+
+<!-- Essentially, Korean students gesture more with friends than professors; for Catalan students there isn't a clear difference. -->
+
+<!-- As another example, which helps show "model" vs "natural" scale, this is the posterior for the `context` effect, for an average speaker, as `dur` is changed: -->
+
+<!-- ```{r} -->
+
+<!-- dyads %>%  -->
+
+<!--   data_grid(dur=seq_range(dur, n = 50), context_prof, language_K=0, gender_M=0) %>% -->
+
+<!--   add_epred_draws(dyads_m12_1, ndraws = 1000, re_formula=NA) %>% -->
+
+<!--   pivot_wider(id_cols = c(.draw, dur), names_from = context_prof, values_from =.epred, names_prefix='context_prof') %>% -->
+
+<!--   mutate(diff = `context_prof-0.5` - `context_prof0.5`) %>% -->
+
+<!--   ggplot(aes(x = dur)) + -->
+
+<!--  stat_lineribbon(aes(y = diff)) + -->
+
+<!--   scale_fill_brewer(palette = "Greys") + -->
+
+<!--   scale_color_brewer(palette = "Set2") + ylab("Pred. prof/friend difference (count)") + xlab("Duration") -->
+
+<!-- ``` -->
+
+<!-- Same, on model scale. -->
+
+<!-- ```{r} -->
+
+<!-- dyads %>%  -->
+
+<!--   data_grid(dur=seq_range(dur, n = 50), context_prof, language_K=0, gender_M=0) %>% -->
+
+<!--   add_linpred_draws(dyads_m12_1, ndraws = 100, re_formula=NA) %>% -->
+
+<!--   pivot_wider(id_cols = c(.draw, dur), names_from = context_prof, values_from =.linpred, names_prefix='context_prof') %>% -->
+
+<!--   mutate(diff = `context_prof-0.5` - `context_prof0.5`) %>% -->
+
+<!--   ggplot(aes(x = dur)) + -->
+
+<!--  stat_lineribbon(aes(y = diff)) + -->
+
+<!--   scale_fill_brewer(palette = "Greys") + -->
+
+<!--   scale_color_brewer(palette = "Set2") + ylab("Pred. prof/friend difference (log-count)") + xlab("Duration") + coord_cartesian(ylim=c(0,0.25)) -->
+
+<!-- ``` -->
+
+We can perform a posterior predictive check, which suggests that the model isn't overdispersed:
+
+<!-- Overdispersion not evident: -->
+
+```{r}
+pp_check(dyads_m12_1, ndraws = 25)
+```
+
+This makes sense, because the structure of the data means that the random-effect terms we've included are almost equivalent to including an offset *for each observation*.
+
+To see the importance of the `offset` term, let's fit the same model, just using default priors. (To choose weakly informative priors, we'd need to think about the distribution of `gestures`, without first subtracting `log(dur)`.) This is **not** a correct model---as the tutorial discusses, the offset is crucial---but it is instructive to see what effect this term has.
+
+```{r}
+dyads_m12_2 <- brm(
+  gestures ~ 1 + context_prof * language_K + gender_M +
+    (1 + context_prof | ID),
+  data = dyads, family = poisson,
+  iter = 8000, warmup = 4000, chains = 4, cores = 4,
+  file = "models/dyads_m12_2.brm"
+)
+dyads_m12_2
+```
+
+::: {#exr-dd1-2}
+a.  Just based on the model's output: What results have changed from the model (`dyads_m12_1`) with the offset term? Qualitatively or quantitatively?
+
+b.  Make an empirical plot like in @sec-dd1-dyads but where the $y$-axis is `gestures`, not `gestures/dur`. Can you see, comparing the two plots, why your results did or did not change between `dyads_m12_1` and `dyads_m12_2`?
+:::
+
+### Negative binomial
+
+The `dyads` data isn't a good case for a negative binomial model because adding the random effects already takes care of overdispersion.
+
+Instead, let's return to the `wordbank` data from Homework 1 (@sec-hw1), where the structure of the data is described:
+
+```{r}
+wordbank_data <- read.csv(file = "wordbank_data_hw1.csv")
+```
+
+We'll build a negative binomial model for all languages, using random effects, instead of just one language (as in @sec-hw1). This model will also contain a couple interesting additional features.
+
+First, some pre-processing:
+
+```{r}
+data_all <- wordbank_data %>%
+  ## at least one language (Russian) has an extra lexical class (adverbs),
+  ## restrict to these four levels for comparability across languages
+  filter(lexical_class %in% c("function_words", "verbs", "adjectives", "nouns")) %>%
+  ## rows with missing values will be dropped when fitting the model anyway
+  filter(!is.na(lexical_class) & !is.na(frequency) & !is.na(MLU) & !is.na(num_phons)) %>%
+  ## for convenience: total number of kids for this language
+  mutate(num_tot = num_true + num_false) %>%
+  ## always run this after excluding all data with a given factor level
+  ## (here, lexical_class)
+  droplevels()
+```
+
+We can use a negative binomial model for this data, where:
+
+-   $y$ = `num_true` is the response
+-   The `offset` is `log(num_tot)`, because $y$ is not comparable across different languages, which summarize data from different numbers of children.
+
+We'll use a negative binomial model because this is a good default for count data (as @winter2021poisson discuss).
+
+Recall that for this data:
+
+-   The main effects of interest are `frequency` and `lexical_class`.\
+-   `MLU` and `num_phons` are included as controls.
+
+We'll allow the effects of `frequency` and `lexical_class` to differ by language, as they're of primary interest. There is no conceptual reason to not use "maximal" random effect structure alloiwng other predictors' effects to differ by language. We don't do so here just so the model fits faster.
+
+A negative binomial model allows for overdispersion using the `shape` parameter. The degree of overdispersion tends to differ between datasets, and it's plausible that it would differ between *languages* here. We'll allow for this by letting the `shape` parameter vary between languages, making this a case of distributional regression (@sec-brm3-dr), a *distributional mixed-effects negative binomial model* (whew!). The code for this is:
+
+```{r, eval = FALSE}
+shape ~ 0 + (1 | language)
+```
+
+The `0` is needed to keep the model from being overparametrized, for reasons I don't totally understand (see discussion for ordinal models in @burkner2019ordinal),[^discrete-data-3] which also require turning off how R treats `0` in model formulas by default, using the `cmc = FALSE` flag.
+
+[^discrete-data-3]: I think what's going on is that `log(shape)` already has a default value (0) implied by the structure of a negative binomial model, so each `language` can't have an independent `shape` parameter estimated---their mean has to be zero. We need to force the model to just allow `log(shape)` to differ from its default value (0) for each language, while not fitting an additional overall `log(shape)` coefficient.
+
+To fit this model:
+
+```{r}
+wordbank_m12_1 <- brm(
+  data = data_all,
+  family = negbinomial,
+  brmsformula(
+    num_true ~ offset(log(num_tot)) + frequency + lexical_class + MLU +
+      num_phons + (1 + lexical_class + frequency | language),
+    shape ~ 0 + (1 | language),
+    cmc = FALSE
+  ),
+  prior = prior(lkj(2), class = cor), control = list(adapt_delta = 0.99),
+  cores = 4, chains = 4, iter = 4000,
+  file = "models/wordbank_m12_1.brm"
+)
+```
+
+Results:
+
+```{r}
+wordbank_m12_1
+```
+
+The model is sure that the degree of overdispersion differs between languages (which row of the model table shows this?). Estimated `shape` by language:
+
+```{r}
+coefficients(wordbank_m12_1)$language[, , "shape_Intercept"]
+```
+
+In contrast, languages don't clearly differ in the (linear) effect of frequency. Estimated effect by language:
+
+```{r}
+coefficients(wordbank_m12_1)$language[, , "frequency"]
+```
+
+Here is one way to show the predicted effect of `frequency` by language (for `nouns`):
+
+```{r}
+new_data <- data_all %>%
+  data_grid(
+    language,
+    frequency = seq_range(frequency, n = 100),
+    num_phons = mean(num_phons),
+    lexical_class = "nouns",
+    MLU = mean(MLU),
+    num_tot = mean(num_tot)
+  )
+
+predictions <- add_epred_draws(wordbank_m12_1, newdata = new_data, re_formula = NULL)
+
+
+ggplot(predictions, aes(x = frequency, y = .epred, color = language)) +
+  stat_summary(fun = mean, geom = "line") +
+  labs(
+    x = "Frequency", y = "Predicted Number of True Items",
+    title = "Effect of Frequency by Language"
+  ) +
+  theme_minimal()
+```
+
+::: {#exr-dd1-3}
+a.  Make a plot showing the predicted effect of `lexical_class` ($x$-axis) for each language, holding other predictors constant.
+
+b.  *Extra*: Make your plot more informative and accurate, as follows:
+
+-   Include 95% CredI's on predictions
+-   Let MLU `num_phons`, `frequency`, and `num_total` have their average values *for a given language*, rather than across the whole dataset.
+-   Anything else you can think of.
+:::
+
+## Ordinal models
+
+Laurestine made a nice visualization app [here](https://www.desmos.com/calculator/zxaomefcny) to help understand (cumulative) ordinal models!
+
+### Without random effects: `etymology` {#sec-dd1-ordinal1}
+
+We use the brms `cumulative` family, with default priors (for simplicity):
+
+```{r, message = FALSE}
+etymology_m12_1 <- brm(
+  data = etymology,
+  family = cumulative,
+  EtymAge ~ 1 + WrittenFrequency + NcountStem + Regularity,
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  file = "models/etymology_m12_1.brm"
+)
+```
+
+```{r}
+summary(etymology_m12_1)
+```
+
+Interpreting some coefficients:
+
+Cumulative probability up to each age:
+
+```{r}
+cumsum(prop.table(xtabs(~EtymAge, data = etymology)))
+```
+
+Cumulative log-odds:
+
+```{r}
+temp <- cumsum(prop.table(xtabs(~EtymAge, data = etymology)))
+logit(temp)
+```
+
+These are similar to the "Intercepts" of the model.
+
+Regularity effect:
+
+-   The log-odds of level $k$ vs level $k-1$ decreases by 0.41 for regular vs. irregular verbs.
+
+```{r}
+prop.table(xtabs(~ Regularity + EtymAge, data = etymology)) -> tab
+tab
+```
+
+Lets examine the empirical values of this for different $k$:
+
+```{r}
+## DutchGerman vs German
+log(tab[2, 2] / tab[2, 1]) - log(tab[1, 2] / tab[1, 1])
+
+## WestGermanic vs DutchGerman
+log(tab[2, 3] / tab[2, 2]) - log(tab[1, 3] / tab[1, 2])
+
+## etc.
+log(tab[2, 4] / tab[2, 3]) - log(tab[1, 4] / tab[1, 3])
+log(tab[2, 5] / tab[2, 4]) - log(tab[1, 5] / tab[1, 4])
+```
+
+These values around -0.4 on average, but they seem to differ a lot across $k$. This means the *proportional odds assumption* may not be satisfied. (There is surely a function to check for this more cleanly.) We can account for this by allowing a category-specific effect of `Regularity`, which is shown in @sec-dd1-extra-ordinal.
+
+Let's visualize the effects using marginal effect plots. (The coefficients are not easy to interpret directly.)
+
+```{r}
+conditional_effects(etymology_m12_1, categorical = TRUE)
+```
+
+`WrittenFrequency` doesn't have a strong effect. A higher `NcountStem` decreases the probability of "smaller" $y$, and increases the probability of "larger" $y$ (*IndoEuropean*). This follows from the positive sign of the coefficient: probability mass is shifted to higher $y$ values as the predictor is increased.
+
+::: {#exr-dd1-4}
+Interpret the `Regularity` coefficient, by filling in the following:
+
+"The `Regularity` coefficient has \_\_\_\_\_\_ (positive/negative) sign. This means that probability mass is shifted to \_\_\_\_ (higher/lower) $y$ values for *Regular* verbs (= higher `Regularity`). That is, *Regular* verbs are predicted to be \_\_\_\_\_ (older/younger) than *Irregular* verbs."
+:::
+
+<!-- The `Regularity` coefficient has the opposite sign, and does the opposite: probability mass is shifted to lower $y$ values for *Regular* verbs (higher `Regularity`). -->
+
+Use an empirical CDF posterior predictive check:
+
+```{r}
+pp_check(etymology_m12_1, ndraws = 50, type = "ecdf_overlay")
+```
+
+(An ECDF plot is preferred to the default `pp_check()` when $y$ is discrete.[^discrete-data-4])
+
+[^discrete-data-4]: @winter2021poisson: "The `pp_check()` function allows a number of different visualisation types. Here we specify the argument `type = 'ecdf_overlay'` to return an empirical cumulative distribution func- tion (ECDF). By default, `pp_check()` returns a smoothed output which may be inappropriate for discrete data, such as count data."
+
+This looks fine.
+
+<!-- #### Posterior distribtuions for custom quantities -->
+
+<!-- Another option for interpreting ordinal models, given the difficulty of interpreting their coefficients, is to calculate posterior distributions over a quantity of interest $X$ for interpreting the model with respect to research questions. -->
+
+<!-- For example, $X$ might be: -->
+
+### Ordinal regression with random effects
+
+For the `idioms` data, a minimal model given the research questions (effect of all `freq` terms) should include by-participant random slopes for all `freq` terms. It should also include by-word random intercepts. Let's fit this model, to the entire dataset, using LKJ(1.5) rather than the LKJ(1) default for random effect correlations:
+
+```{r, message = FALSE}
+idioms_m12_1 <- brm(
+  data = idioms,
+  family = cumulative,
+  score ~ 1 + freq_word_1 + freq_word_2 + freq_compound + literal_meaning + (1 + freq_word_1 + freq_word_2 + freq_compound | participant) + (1 | word),
+  prior = c(
+    prior(lkj(1.5), class = cor)
+  ),
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  file = "models/idioms_m12_1.brm"
+)
+```
+
+```{r}
+summary(idioms_m12_1)
+```
+
+`freq_compound` and `literal_meaning` have clear effects, while individual word frequencies do not (`freq_word_1`, `freq_word_2`).
+
+<!-- Note: I had to fit this, and the other model below, on a remote machine. On my laptop, each would take 15-60 min. -->
+
+<!-- A minimal model given the research questions (effect of `frequency`) should include by-participant random slopes.  Let's fit this model, to the entire dataset, using LKJ(1.5) rather than the LKJ(1) default for random effect correlations: -->
+
+<!-- ```{r} -->
+
+<!-- idioms_m12_3 <- brm(data = idioms,  -->
+
+<!--       family = cumulative, -->
+
+<!--       score ~ 1 + freq_word_1 + freq_word_2 + freq_compound + literal_meaning + (1+freq_word_1 + freq_word_2 + freq_compound|participant), -->
+
+<!--       prior = c( -->
+
+<!--         prior(lkj(1.5), class=cor) -->
+
+<!--       ), -->
+
+<!--       iter = 2000, warmup = 1000, cores = 4, chains = 4, -->
+
+<!--       file = "models/idioms_m12_3.brm") -->
+
+<!-- ``` -->
+
+```{r}
+conditional_effects(idioms_m12_1, categorical = TRUE)
+```
+
+Plotting model predictions by participant is a bit confusing, if we want to compare to empirical patterns. We consider predictions for an "average word"---a single observation---in two ways:
+
+1.  The distribution of predictions, by participant (= posterior predictive distribution)
+2.  The *fitted value*, by participant.
+
+What makes this confusing is that both look like histograms of values from 1-6. This is because the "fitted value" for a *single* observation is a vector of probabilities: the probability of each of categories 1--6. If you look closely at the two plots, you can see that the distributions in (1) are wider, for each participant. This is because on the latent scale, noise is added to the fitted value (plot (2)), resulting in a distribution which is slightly flattened out.
+
+```{r}
+idioms %>%
+  droplevels() %>%
+  data_grid(freq_word_1 = 0, freq_word_2 = 0, freq_compound = 0, literal_meaning = "yes", participant) %>%
+  add_predicted_draws(idioms_m12_1, re_formula = ~ (1 | participant), ndraws = 500) %>%
+  ggplot(aes(x = .prediction)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~participant, scales = "free_y")
+
+## *average* prediction for an 'average word', by-participant.
+idioms %>%
+  droplevels() %>%
+  data_grid(freq_word_1 = 0, freq_word_2 = 0, freq_compound = 0, literal_meaning = "yes", participant) %>%
+  add_epred_draws(idioms_m12_1, re_formula = ~ (1 + freq_word_1 + freq_word_2 + freq_compound | participant)) %>%
+  group_by(.category, participant) %>%
+  median_qi(.epred) %>%
+  ggplot(aes(x = .category, y = .epred)) +
+  geom_line(group = 1) +
+  facet_wrap(~participant) +
+  ylim(0, 0.4)
+```
+
+Note the mismatch match of plot (1) with the empirical data, where subjects see to differ in the "width" of the distribution, to the extent that some look bimodal while others look unimodal.[^discrete-data-5]
+
+[^discrete-data-5]: Exercise: why will plot (2) never show this mismatch, and in fact we don't expect it to look like the empirical data in terms of the *width* of participants' distributions? This took me a while to realize.
+
+We can also see this mismatch in a posterior predictive plot, grouped by subject:
+
+```{r}
+pp_check(idioms_m12_1, type = "ecdf_overlay_grouped", ndraws = 50, group = "participant")
+```
+
+(Subject 141, for example)
+
+#### Distributional model
+
+The simplest step to address this is to allow participants to differ in variance:[^discrete-data-6]
+
+[^discrete-data-6]: Another step would be making the by-participant intercept category specific, but this means adding many more coefficients: 5 per participant.
+
+```{r}
+idioms_m12_2 <- brm(
+  data = idioms,
+  family = cumulative,
+  formula =
+    bf(score ~ 1 + freq_word_1 + freq_word_2 + freq_compound + literal_meaning + (1 + freq_word_1 + freq_word_2 + freq_compound | participant) + (1 | word)) +
+      lf(disc ~ 0 + (1 | participant), cmc = FALSE),
+  prior = c(
+    prior(lkj(1.5), class = cor)
+  ),
+  iter = 4000, warmup = 2000, cores = 4, chains = 4,
+  control = list(adapt_delta = 0.9),
+  file = "models/idioms_m12_2.brm"
+)
+```
+
+Variance is controlled by a parameter `disc`: variance = 1/`disc`. By default (in the model fitted above), it is fixed to 1. Because `disc` must be positive, if we model it (a case of distributional regression: @sec-brm3-dr), `brms` automatically puts the model in log space:
+
+$$
+\log(\text{disc}) = \text{(predictors)}
+$$ The model sets $\log(\text{disc})$ to have mean zero (corresponding to `disc`=1), and participants vary (by-participant random effect). The `0 + (1|participant)` notation is important, and relates to the fact that we don't want the *baseline* value of `disc` to be estimated---see the Burkner & Vuorre tutorial [@burkner2019ordinal].
+
+Note the extra term in the model summary:
+
+```{r}
+summary(idioms_m12_2)
+```
+
+```{r}
+conditional_effects(idioms_m12_2, categorical = TRUE)
+```
+
+Distribution of predictions, by participant, for a single observation, like plot (1) for the previous model:
+
+```{r}
+idioms %>%
+  droplevels() %>%
+  data_grid(freq_word_1 = 0, freq_word_2 = 0, freq_compound = 0, literal_meaning = "yes", participant) %>%
+  add_predicted_draws(idioms_m12_2, re_formula = ~ (1 | participant), ndraws = 500) %>%
+  ggplot(aes(x = .prediction)) +
+  geom_histogram(stat = "count") +
+  facet_wrap(~participant, scales = "free_y")
+```
+
+Note how some participants are allowed to have "wider" distributions. This follows naturally from allowing variance to differ by-participant: high variance on the latent scale gives a "wider" distribution on the $y$ scale. It is hard to judge visually, but we can see which participants are predicted to have wider/narrow distributions by examining their predicted `disc` values:
+
+```{r}
+coefficients(idioms_m12_2)$participant[, , "disc_Intercept"] %>%
+  data.frame() %>%
+  arrange(Estimate) # sort by value
+```
+
+Participant 191 is predicted to have the widest distribution (because variance = 1/`disc`), and participant 5 the narrowest. This seems plausible from the empirical data.
+
+Comparing LOO also suggests the more complex model is better:
+
+```{r}
+loo(idioms_m12_1, idioms_m12_2, cores = 4)
+```
+
+<!-- Model for all participants: -->
+
+<!-- ```{r} -->
+
+<!-- ## Takes a while to fit! -->
+
+<!-- idioms_m12_4 <- brm(data = idioms, -->
+
+<!--                     family = cumulative, -->
+
+<!--                     score ~ 1 + freq_word_1 + freq_word_2 + freq_compound + literal_meaning + (1+freq_word_1 + freq_word_2 + freq_compound|participant), -->
+
+<!--                     prior = c( -->
+
+<!--                       prior(lkj(1.5), class=cor) -->
+
+<!--                     ), -->
+
+<!--                     iter = 2000, warmup = 1000, cores = 4, chains = 4, -->
+
+<!--                     file = "models/idioms_m12_4.brm") -->
+
+<!-- ``` -->
+
+## Multinomial models
+
+### Without random effectgs: `regularity`
+
+Fit a basic multinoimial model to the `regularity` data, using brms' default priors.
+
+As always, you should think more carefully about these priors for a real analysis. This is trickier for multinomial regression than for logistic regression, as usefully discussed by @barreda2023bayesian, [Sec. 12.2.5](https://santiagobarreda.com/bmmrmd/multinomial-and-ordinal-regression.html#fitting-the-model).
+
+```{r}
+regularity_m12_1 <-
+  brm(
+    data = regularity,
+    family = categorical(link = logit),
+    Auxiliary ~ Regularity.num + WrittenFrequency,
+    iter = 2000, warmup = 1000, cores = 4, chains = 4,
+    file = "models/regularity_m12_1.brm"
+  )
+```
+
+```{r}
+summary(regularity_m12_1)
+```
+
+Define:
+
+-   $y$ = `Auxiliary` (values: 1, 2, 3 = *hebben*, *zijnheb*, *zijn*)
+-   $p_1$, $p_2$, $p_3$ are the probabilities of each `Auxiliary` value.
+-   $x_1$ is `WrittenFrequency`
+-   $x_2$ is `Regularity.num`
+
+Then the model, abstracting away from priors, is:
+
+```{=tex}
+\begin{align}
+\log(\frac{p_2}{p_1}) & = \beta^{21}_0 + \beta^{21}_1 x_1 + \beta^{21}_2 x_2  \\
+\log(\frac{p_3}{p_1}) & = \beta^{31}_0 + \beta^{31}_1 x_1 + \beta^{31}_2 x_2 \\
+p_1 + p_2 + p_3 & = 1
+\end{align}
+```
+The "score" for each outcome is:
+
+```{=tex}
+\begin{align}
+s_1 & = 0 \\
+s_2 & = \beta^{21}_0 + \beta^{21}_1 x_1 + \beta^{21}_2 x_2 \\
+s_3 & = \beta^{31}_0 + \beta^{31}_1 x_1 + \beta^{31}_2 x_2
+\end{align}
+```
+These can be used to write the relationship between linear predictors (=scores) and probabilities, in "softmax" form:
+
+$$
+p_i = \frac{\exp(s_i)}{\sum_{j=1}^{3}\exp(s_j)}
+$$
+
+Interpretation of some coefficients:
+
+-   `muzijnheb_Intercept`: $\beta_{0}^{21}$, the log-odds of `Auxiliary` = *zijnheb* vs. *hebben*, when $x_1 = x_2 = 0$.
+    -   Because $x_1$ and $x_2$ are centered, this should be roughly the same as "average log-odds of `Auxiliary` = *zijnheb* vs. *hebben* \[across all data\]".
+
+```{r}
+pt_aux <- prop.table(xtabs(~Auxiliary, data = regularity))
+pt_aux
+log(pt_aux[2] / pt_aux[1]) # about the same as "Estimate" column: ~-1.7
+```
+
+-   `muzijn_Intercept`: $\beta_{0}^{31}$ similar, for "average log-odds of `Auxiliary` = *zijn* vs. *hebben* \[across all data\]"
+
+```{r}
+log(pt_aux[3] / pt_aux[1]) # about the same as "Estimate" column:
+```
+
+-   We can also compare to the predicted probabilities, using the "scores" formulation from above:
+
+```{r}
+## these are the  "Estimate" values for muzijnheb_Intercept
+## and muzijn_Intercept
+scores <- c(0, fixef(regularity_m12_1)[1, 1], fixef(regularity_m12_1)[2, 1])
+
+## this is the equation for p_i from above
+exp(scores) / sum(exp(scores))
+```
+
+These are similar to the empirical probabilities:
+
+```{r}
+pt_aux
+```
+
+-   `muzijnheb_Regularity.num`: $\beta_{2}^{21}$ the change in "log-odds of `Auxiliary` = *zijnheb* vs. *hebben*" between `Regularity`=regular and `Regularity`=irregular.
+    -   The `muzijnheb_` notation is because this is a coefficient of the logit model of $\mu$ for *zijnheb* vs. reference level, *hebben*.
+
+```{r}
+pt_aux_reg <- prop.table(xtabs(~ Regularity + Auxiliary, data = regularity), margin = 1)
+pt_aux_reg
+```
+
+Log-odds of zijnheb vs. hebben:
+
+-   Regularity=irregular: log(0.245/0.769) = -1.14
+-   Regularity=regular: log(0.11829945/0.86691312) = -1.99
+
+Change in log-odds: -1.99 - -1.14 = -0.85
+
+That's similar to the `muzijnheb_Regularity.num` estimate. (It won't be exactly the same, because the model also accounts for `WrittenFrequency`.)
+
+This exercise hopefully demonstrates that interpreting the actual model coefficients is unintiitve. Instead it is better to understand fitted multinomial models by computing quantities of interest, and using these downstream---in effect plots, posterior examination, hypothesis tests, etc.
+
+The equivalent frequentist model is shown in @sec-extra-dd1-multinomial.
+
+#### Plotting effects
+
+Marginal effect of `WrittenFrequency` (averaging over `Regularity.num`):
+
+```{r}
+conditional_effects(regularity_m12_1, categorical = TRUE, effects = c("WrittenFrequency"))
+```
+
+There is little frequency effect evident in this model, that also includes verb `Regularity`. (Note that regular verbs have higher frequency; presumably there would be a frequency effect in a model without `Regularity`.) This is consistent with the 95% CI for both `_WrittenFrequency` terms overlapping zero.
+
+Marginal effect of `Regularity.num`, treated as a numeric predictor (so you need to imagine there are just two values):
+
+```{r}
+conditional_effects(regularity_m12_1, categorical = TRUE, effects = c("Regularity.num"))
+```
+
+To see marginal effects of `Regularity` treated as a factor requires more legwork. (Code commented out, and there is probably an easier way to do this.) Often it is easier to just refit your model using factors for discrete predictors, and use it to make prediction plots.
+
+<!-- ```{r, echo=FALSE} -->
+
+<!-- ## set up dataframe to predict at -->
+
+<!-- pred_df <- expand.grid(WrittenFrequency = 0, Regularity.num = unique(regularity$Regularity.num)) -->
+
+<!-- # pred_df -->
+
+<!-- ## predicted probability of each Auxiliary -->
+
+<!-- predict(regularity_m12_1, newdata = pred_df) -->
+
+<!-- ## draw predicted probabilities, for each Auxiliary, from posterior: -->
+
+<!-- draws <- pred_df %>% add_epred_draws(regularity_m12_1) -->
+
+<!-- draws -->
+
+<!-- ## make Regularity.num a factor -->
+
+<!-- draws$Regularity <- factor(draws$Regularity.num) -->
+
+<!-- levels(draws$Regularity) <- c("irregular", "regular") -->
+
+<!-- draws$Regularity.num <- NULL -->
+
+<!-- draws %>% -->
+
+<!--   group_by(WrittenFrequency, Regularity, .row, .category) %>% -->
+
+<!--   median_qi() %>% -->
+
+<!--   ggplot(aes(x = Regularity, y = .epred)) + -->
+
+<!--   geom_pointinterval(aes(ymin = .lower, ymax = .upper, color = .category)) + -->
+
+<!--   ylim(0, 1) + -->
+
+<!--   ylab("Median + 95% CI posterior prob.") -->
+
+<!-- ``` -->
+
+::: {#exr-dd1-5}
+a.  Use `hypothesis()` to formally test whether either `WrittenFrequency` coefficient is larger than 0.
+
+b.  Make a plot showing the marginal effect of `Regularity`, treated as a factor.[^discrete-data-7]
+:::
+
+[^discrete-data-7]: Hint: Two ways to do this are to do some post-processing of the output of `conditional_effects()`, or just re-fit the model with `Regularity` coded as a factor.
+
+## Extra
+
+### Frequentist Poisson mixed-effects model
+
+Corresponding to `dyads_m12_1` in @sec-dd1-poisson
+
+```{r}
+dyads_freq_m12 <- glmer(gestures ~ 1 + context_prof * language_K + gender_M +
+  offset(log(dur)) +
+  (1 + context_prof | ID), data = dyads, family = "poisson")
+
+summary(dyads_freq_m12, corr = FALSE)
+```
+
+### Frequentist ordinal model
+
+Corresponding to model `etymology_m12_2` in @sec-dd1-ordinal1.
+
+Fitted using `polr()` from MASS:
+
+```{r}
+etymology_freq_m12 <- polr(EtymAge ~ WrittenFrequency + Regularity + NcountStem, data = etymology, Hess = TRUE)
+
+summary(etymology_freq_m12)
+```
+
+### Ordinal model with category-specific effects {#sec-dd1-extra-ordinal}
+
+Model with category-specific effects:
+
+```{r, message = FALSE}
+etymology_m12_2 <- brm(
+  data = etymology,
+  family = cumulative,
+  EtymAge ~ 1 + WrittenFrequency + NcountStem + cs(Regularity),
+  iter = 2000, warmup = 1000, cores = 4, chains = 4,
+  control = list(adapt_delta = 0.99),
+  file = "models/etymology_m12_2.brm"
+)
+```
+
+```{r}
+summary(etymology_m12_2)
+```
+
+(If we choose to ignore the warnings:) There are now category-specific values of the `Regularity` coefficient, as for the `Intercept` (cutoffs). Note that all the `Regularity` coefficients have 95% CIs that overlap. This model does not seem to be an improvement over the previous one, which we can check by comparing LOO:
+
+```{r}
+etymology_m12_1 <- add_criterion(etymology_m12_1, "loo")
+etymology_m12_2 <- add_criterion(etymology_m12_2, "loo")
+
+
+loo_compare(etymology_m12_1, etymology_m12_2)
+```
+
+The simpler model is preferred.
+
+### Frequentist multinomial model {#sec-dd1-extra-multinomial}
+
+We follow @levshina2015linguistics Chap. 13, using the mlogit package [@mlogit], to fit a frequentist multinoimal model to the `regularity data.`
+
+First, transform the data to the format required by `mlogit()`:
+
+```{r}
+regularity_2 <- mlogit.data(regularity, shape = "wide", choice = "Auxiliary")
+```
+
+Fit the model:
+
+```{r}
+regularity_m12_freq <- mlogit(formula = Auxiliary ~ 1 | Regularity.num + WrittenFrequency, data = regularity_2, reflevel = "hebben")
+```
+
+The `reflevel` argument makes the sub-models compare the probabilties of the same `Auxiliary` levels as model `regularity_m12_1`.
+
+```{r}
+summary(regularity_m12_freq)
+```

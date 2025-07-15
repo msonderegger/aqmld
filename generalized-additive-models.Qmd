@@ -1,0 +1,396 @@
+# Generalized Additive Models (GAMs) {#sec-gams}
+
+**This chapter was written by Márton Sóskuthy** (Sec. 1-4) with Sec. 5 added by Morgan Sonderegger, who also changed some formatting throughout for consistency with the rest of this e-book.
+
+This lab covers topics from:
+
+-   @soskuthy2017generalised, pp. 1-8 & 21-26
+-   @soskuthy2021evaluating, up to Sec. 1.2.2
+
+It refers to the "Day 1" slides from Sóskuthy's Dec. 2024 GAMMs workshop, available [here](https://osf.io/twn7m/).
+
+Topics:
+
+-   Generalized Additive Models (GAMs)
+
+## Preliminaries
+
+We load a couple of libraries: mgcv is the main library for fitting GAMs; itsadug is mainly for plotting (and has a number of other convenience functions). The tidyverse is for everything else!
+
+```{r, message = FALSE}
+library(tidyverse)
+library(mgcv)
+library(itsadug)
+```
+
+New packages for us are:
+
+-   mgcv [@wood2017generalized], for fitting generalized additive (mixed) models (GA(M)Ms).
+-   itsadug [@itsadug], convenience functions for fitting and interpreting GAMMs using mgcv.
+
+Data import:
+
+```{r}
+temp <- read.delim("https://osf.io/download/7ut2r/")
+price_bin <- readRDS(file = url("https://osf.io/download/vs6jk/"))
+
+## you can also download the data files from Piazza, and
+## load them in as follows from the current directory:
+# temp <- read_tsv("global_temperature.txt")
+# price_bin <- readRDS("price_bin.rds")
+```
+
+Subset of older speakers from `price_bin` data, which we'll need below:
+
+```{r}
+price_bin_older <- price_bin %>%
+  filter(age == "older")
+```
+
+## New Zealand diphthong data
+
+### Subset: older speakers only
+
+Here's the GAM we looked at in the slides (slide 23 on), fitted to the subset of the `price_bin` data from older speakers:
+
+```{r}
+price_bin_older_gam <-
+  bam(f2 ~ s(measurement_no, bs = "cr", k = 11),
+    data = price_bin_older
+  )
+```
+
+Here's the summary that we went through:
+
+```{r}
+summary(price_bin_older_gam)
+```
+
+And here's a simple plot of the smooth, using the `plot_smooth()` function from the itsadug package.
+
+```{r}
+plot_smooth(price_bin_older_gam, view = "measurement_no")
+```
+
+::: {#exr-gamm1-1}
+I'd like to invite you to explore this smooth.
+
+a.  What happens to the smooth if you change the value of `k`, either increasing or decreasing it? Does the code still work? What does the resulting smooth look like when you plot it using plot_smooth()?
+
+b.  Try using different types of basis functions. One of them can be accessed using `bs="tp"` (a thin-plate smooth); another one using `bs="ps"`. Do these change the shape of the smooth?
+:::
+
+Example code for @exr-gamm1-1 to un-hide if you need help:
+
+```{r, eval = FALSE}
+#| code-fold: true
+
+a.
+price_bin_older_gam_k6 <-
+  bam(f2 ~ s(measurement_no, bs = "cr", k = 6),
+    data = price_bin_older
+  )
+plot_smooth(price_bin_older_gam_k6, view = "measurement_no")
+
+b.
+price_bin_older_gam_tp6 <-
+  bam(f2 ~ s(measurement_no, bs = "tp", k = 6),
+    data = price_bin_older
+  )
+plot_smooth(price_bin_older_gam_tp6, view = "measurement_no")
+```
+
+### Full dataset {#sec-gamms1-full-dataset}
+
+And now we look at the full data set, capturing the difference between the older vs. younger groups using a difference smooth. Here's the model that we explored in the slides (slide 37 on):
+
+```{r}
+price_bin$age_o <- as.ordered(price_bin$age)
+contrasts(price_bin$age_o) <- "contr.treatment"
+
+price_bin_gam <-
+  bam(
+    f2 ~ age_o +
+      s(measurement_no, bs = "cr", k = 11) +
+      s(measurement_no, bs = "cr", k = 11, by = age_o),
+    data = price_bin
+  )
+```
+
+The model summary.
+
+```{r}
+summary(price_bin_gam)
+```
+
+And a plot!
+
+```{r}
+plot_smooth(price_bin_gam, view = "measurement_no", plot_all = "age_o")
+```
+
+It's also possible to plot the difference smooth alone (using `plot_diff()` from itsadug).
+
+```{r}
+plot_diff(price_bin_gam,
+  view = "measurement_no",
+  comp = list(age_o = c("older", "younger"))
+)
+```
+
+::: {#exr-gamm1-2}
+The data set also contains a variable called `following_voiceless`, which captures the voicing of the following segment. We expect that this vowel will be realised differently when followed by a voiceless segment; but is that the case?
+
+a.  Set up following_voiceless as an ordered factor with treatment coding (like we did for `age_o` above).
+
+b.  Fit a model with a difference smooth (again, analogous to the one above).
+
+c.  Plot the results.
+:::
+
+Solutions to @exr-gamm1-2:
+
+```{r, eval = FALSE}
+#| code-fold: true
+
+price_bin$foll_v_o <- as.ordered(price_bin$following_voiceless)
+contrasts(price_bin$foll_v_o) <- "contr.treatment"
+
+price_bin_gam_fv <-
+  bam(
+    f2 ~ foll_v_o + age_o +
+      s(measurement_no, bs = "cr", k = 11) +
+      s(measurement_no, bs = "cr", k = 11, by = age_o) +
+      s(measurement_no, bs = "cr", k = 11, by = foll_v_o),
+    data = price_bin, method = "ML"
+  )
+
+summary(price_bin_gam_fv)
+
+plot_smooth(price_bin_gam_fv, view = "measurement_no", plot_all = "foll_v_o")
+```
+
+## Global Temperature Data
+
+Let us now play around with the global temperature data. It's stored in a data frame called `temp`. The relevant columns we're interested in are `Year` and `median`, where `median` actually has the temperature values (it's "median" because the temperatures from before the modern age are based on estimates from many different models; there are a range of possible estimates for each year, so the median gives you the "best guess").
+
+Here's a plot of the raw data:
+
+```{r}
+plot(median ~ Year, data = temp, pch = 15, cex = 0.2)
+```
+
+And here is a GAM fit to this data to get you started, along with a prediction plot.
+
+```{r}
+temp_gam <- bam(median ~ s(Year, bs = "cr", k = 50), data = temp)
+plot(median ~ Year, data = temp, pch = 15, cex = 0.2)
+plot_smooth(temp_gam, view = "Year", add = T, n.grid = 2000, rug = F)
+```
+
+For reference, here's how the GAM plot shown in the slides (slide 17) was created:
+
+```{r}
+temp_gam_slides <- bam(median ~ s(Year, bs = "ad", k = 50), data = temp, rho = 0.7)
+plot(median ~ Year, data = temp, pch = 15, cex = 0.2)
+plot_smooth(temp_gam_slides, view = "Year", add = T, n.grid = 2000, rug = F)
+```
+
+Notes on this model:
+
+-   The `bs="ad"` argument sets up a so-called *adaptive smoother* that can vary the smoothing parameter as a function of the time variable, i.e. certain date ranges can have more or less wiggly estimates than others. Standard smoothers (e.g. `bs="cr"` or `bs="tp"`) can't do this.
+
+-   The argument `rho=0.7` at the end adds an *autoregressive error model*, which deals with short-term dependencies between neighbouring data points. In this case, this AR error model can help us remove some of the short-term fluctuations from the data.
+
+::: {#exr-gamm1-3}
+a.  Play around with different `k` values to see how they affect your GAM smoother.
+
+b.  Play around with different smoother types ( e.g. `bs="cr"` or `bs="tp"`) to see how they affect your GAM smooth.
+
+c.  What happens if you leave out the autoregressive error model?
+:::
+
+## Autocorrelation in the New Zealand diphthong data
+
+Consider the `price_bin_gam` model from @sec-gamms1-full-dataset.
+
+We can plot autocorrelation in the residuals as follows.
+
+```{r}
+acf(resid_gam(price_bin_gam), lag.max=10)
+```
+
+Here's how to include an AR1 error model in a GAM.
+
+```{r}
+# first, we need to have an indicator variable
+# that tells our gam where each trajectory
+# starts; also, the data set has to be set up
+# so that adjacent measurements are also
+# adjacent within the data set (which is already
+# the case here)
+price_bin <- price_bin %>%
+  group_by(id) %>%
+  mutate(traj_start=measurement_no == min(measurement_no)) %>%
+  ungroup()
+
+# we obtain the autocorrelation at lag 1 within
+# our data set
+rho_est <- start_value_rho(price_bin_gam)
+
+# we run the same model, but with two extra parameters:
+# - AR.start is the indicator variable that shows
+#   the start of each trajectory in the data set
+# - rho is roughly the degree of autocorrelation we
+#   wish to remove
+price_bin_gam_AR <- 
+  bam(f2 ~ age_o +
+        s(measurement_no, bs="cr", k=11) +
+        s(measurement_no, bs="cr", k=11, by=age_o),
+      data=price_bin,
+      AR.start=traj_start, rho=rho_est)
+```
+
+Summarize this model:
+
+```{r}
+summary(price_bin_gam_AR)
+```
+
+Comparing the two models (without vs. with AR1) graphically.
+
+```{r}
+plot_smooth(price_bin_gam, view="measurement_no", plot_all="age_o")
+plot_smooth(price_bin_gam_AR, view="measurement_no", plot_all="age_o")
+```
+
+Now plotting the autocorrelation for this revised model. Note that `resid_gam()` has to be used for models that include an AR1 error model.
+
+```{r}
+acf(resid_gam(price_bin_gam_AR), lag.max=10)
+```
+
+::: {#exr-gamm1-4}
+Determine the best `rho` value for the global temperature model above. (Is it 0.7, the value we used?)
+:::
+
+### GAMs beyond linear regression {#sec-gams-beyond}
+
+GAMs are *generalized* additive models in the same sense that GLMs are "generalized": they can fit any model from the "exponential family", including logistic regression and Poisson regression.[^week6-1]
+
+[^week6-1]: mgcv also has extensive support for models beyond the exponential family, such as negative-binomial models.
+
+To show an example, let's load a new dataset, showing how the word "monitor" was used historically:
+
+```{r}
+monitor <- read.csv("monitor_simplified.csv")
+```
+
+This dataset was generously provided by [Gaurav Kamath](https://grvkamath.github.io/), PhD student in Linguistics, from a much larger dataset he's using in current research.
+
+Each row of this data corresponds to a single speech, by one parlimetarian, in the US Congress. It lists the number of times the word "monitor" was used in the speech in the senses of "ship" ("The U.S.S. Monitor docked"), "observe" ("We've got to monitor this"), or "newspaper" ("Christian Science Monitor"). These different meanings of the same (orthographic) word are called *senses*. Gaurav's project examines how word senses change over time.
+
+Columns of the dataframe:
+
+-   `speech_id`: unique ID for the speech
+-   `year` the speech was delivered
+-   `sense`: word sense
+-   `count`: number of uses of this sense
+-   `n`: number of uses across all senses
+
+Thus, `n` is the same for rows 1-3, then rows 4-6, etc.
+
+Plot of proportion of uses of each sense over time:
+
+```{r, warning = FALSE}
+ggplot(monitor, aes(x = year, y = count/n, color = sense)) +
+geom_smooth() +  
+labs(x = "Year", y = "Proportion (count/n)", color = "Sense") + 
+coord_cartesian(ylim = c(0,1))
+```
+
+How "monitor" is used has changed dramatically over time.
+
+Let's model the rise and fall of the sense "newspaper". First, subset to just this data:
+
+```{r}
+monitor_newspaper <- filter(monitor, sense == 'newspaper')
+```
+
+We'd like to model the probability of using sense "newspaper". We can use a *binomial* model here, which is the same as logistic regression but for aggregated data. Instead of e.g. row 1 of `monitor_newspaper` being 3 rows with "usage = 1" (corresponding to `count` = 3) and 37 rows with "usage = 0" (corresponding to `n` = 40 minus `count` = 3).
+
+Fit this model:
+
+```{r}
+m1 <- bam(cbind(count, n-count) ~ s(year), data = monitor_newspaper, family = binomial)
+```
+
+::: {#exr-gamm1-5}
+a.  Plot the predicted smooth from this model using `plot_smooth()`.
+
+b.  Your plot should have a similar shape to the empirical plot above, but different numbers on the y-axis. Why is this?
+:::
+
+It's worth mentioning that including autocorrelation via an argument to `bam()` is *not* possible for generalized models (such as logistic regression).[^week6-2]
+
+[^week6-2]: To do this, you could switch to using a `gamm()` model with a `correlation` argument instead of a `bam()` model. This will fit much more slowly.
+
+### Working with mgcv models {#sec-working-with-mgcv}
+
+itsadug is the package most commonly used by (psycho)linguists to work with fitted GA(M)Ms. itsadug has good functionality, but it's important to not be limited by what any one package can do. Many packages can make predictions and prediction plots from mgcv models (fitted with `bam()` or `gam()`), such as ggeffects, modelbased, gratia, or emmeans. Different things you'll want to do will be easier in different packages.
+
+An example using ggeffects (used throughout *RMLD*: @rmld-book), which by default makes predictions on the *response scale*---here, probabilities, rather than log-odds.
+
+```{r}
+library(ggeffects)
+
+preds <- ggpredict(m1, terms = "year")
+
+plot(preds) +
+  labs(y = "Predicted Probability", x = "Year") + ylim(0,1)
+```
+
+How similar does this look to your plot from @exr-gamm1-4?
+
+To exemplify using emmeans with mgcv models, let's fit a model to data from all three word senses.
+
+<div>
+
+Fit this model as `m2`, using the `monitor` dataframe. (Hint: this is like the `price_bin_gam` model above.) Don't worry about autocorrelation here.
+
+Solution:
+
+```{r}
+#| code-fold: true
+
+monitor$sense <- as.ordered(monitor$sense)
+contrasts(monitor$sense) <- "contr.treatment"
+
+
+m2 <- bam(cbind(count, n-count) ~ sense + s(year) + s(year, by = sense), data = monitor, family = binomial)
+```
+
+</div>
+
+Model predictions:
+
+```{r}
+preds <- ggpredict(m2, terms = c("year", "sense"))
+
+plot(preds) +
+  labs(y = "Predicted Probability", x = "Year", title = "") + ylim(0,1)
+```
+
+This emmeans code finds the pairwise differences between senses, averaging across years:
+
+```{r}
+library(emmeans)
+
+emm <- emmeans(m2, ~sense)
+
+pairs(emm)
+```
+
+::: {#exr-gamm1-6}
+What are these pairwise differences when `year` = 2010? (This requires figuring out how to get emmeans to make predictions about one predictor while another is held constant at a given value.)
+:::

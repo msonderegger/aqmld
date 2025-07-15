@@ -1,0 +1,204 @@
+# Homework 5 {#sec-hw5}
+
+
+
+## Preliminaries
+
+Load libraries we'll need:
+
+```{r, message=FALSE}
+library(tidyverse)
+library(arm)
+
+library(GGally)
+```
+
+You should submit a single `.zip` folder (see Piazza for deadline/format).
+
+* If you're using `rmd`, the folder should contain:
+  * The final `.rmd` file
+  * The compiled `.html` file
+* If you're using `qmd`, it should contain:
+  * The final `.qmd` file
+  * The compiled `.html` file
+  * The `_files` folder, needed to render the html file.
+
+You are welcome to work together , but you must write up your code and (prose) results independently. See the syllabus for the collaboration and Generative AI policy.
+
+Make sure that your plots and prose are polished and legible.
+
+### Data
+
+Load data:
+
+```{r}
+### load diatones data
+diatones <- read.csv("https://osf.io/tqjm8/download", stringsAsFactors = TRUE)
+
+## make numeric versions of all categorical predictors, while saving original versions
+diatones <- diatones %>% mutate(
+  syll1_coda_orig = syll1_coda,
+  syll2_coda_orig = syll2_coda,
+  syll2_td_orig = syll2_td,
+### turns no/yes -> 0/1
+syll1_coda = ifelse(syll1_coda=='no', 0, 1),
+### turns '0'/'C'/'CC'/'CCC' -> 0/1/2/3
+syll2_coda = str_count(syll2_coda_orig, "C"), 
+syll2_td = ifelse(syll2_td=='no', 0, 1)
+)
+
+### standardize all predictors using arm::rescale 
+diatones <- diatones %>% mutate(syll1_coda = arm::rescale(syll1_coda_orig),
+                                syll2_td = arm::rescale(syll2_td_orig),
+                                syll2_coda = arm::rescale(syll2_coda),
+                                frequency = arm::rescale(frequency)
+)
+
+
+## get Roettger et al. German incomplete neutralization data
+neutralization <- read.csv('https://osf.io/qg5fc/download', stringsAsFactors=TRUE) %>%
+  mutate(voicing_fact = fct_relevel(voicing, 'voiceless')) %>% filter(!is.na(prosodic_boundary)) %>%
+  mutate(prosodic_boundary = rescale(prosodic_boundary),
+         voicing = rescale(voicing_fact),
+         item_pair = as.factor(item_pair),
+         subject=as.factor(subject)
+  )
+
+## helmert coding for multi-level factors, so all predictors are "centered"
+contrasts(neutralization$vowel) <- contr.helmert
+contrasts(neutralization$place) <- contr.helmert
+
+## get Grawunder incomplete neutralization data
+
+grawunder_df <- read.delim("https://osf.io/7vbsy/download", sep='\t', stringsAsFactors = TRUE) %>%
+  mutate(voicing_fact = fct_relevel(voicing, 'voiceless'))  %>%
+  mutate(voicing = rescale(voicing_fact)) %>%
+  rename(item_pair=pair, vowel_dur=dur) ### rename some predictors to have the same names as neutralization data
+
+
+## helmert coding for multi-level factors, so all predictors are "centered"
+contrasts(grawunder_df$vowel) <- contr.helmert
+contrasts(grawunder_df$place) <- contr.helmert
+contrasts(grawunder_df$population) <- contr.helmert
+contrasts(grawunder_df$stimtype) <- contr.helmert
+
+## stimtype = German / Tirol (subject-level)
+```
+
+
+
+<!-- Find a research paper that uses bayesian statistical models, and reports the results in at least moderate detail.  It should not be: -->
+
+<!-- * A methodology paper (like the Vasishth et al. 2018 tutorial) -->
+<!-- * A paper that fits bayesian models, but does not report much quanitative detail.^[Many computational cognitive modeling papers fall into this category; the comparison with data is via a few summary numbers, or plots comparing model predictions with human data.] -->
+
+<!-- The paper should ideally be on a topic of interest to you, or at least on a topic that you can understand.   -->
+
+<!-- *Step 1*: Post your paper, in a new Piazza thread, ideally by **November 4**. -->
+
+<!--   * Post the paper name, authors, etc., plus the PDF. -->
+
+<!-- *Step 2*: Read the paper in enough detail to understand the main statistical model being reported. -->
+
+<!--   * If there are several models reported, you can just focus on one -->
+<!--   * If the models are quite simple (e.g. 1-2 predictors), you should report on two. -->
+
+<!-- *Step 3*: Make a post about the paper in your Piazza thread, by **November 8** -->
+
+<!--   * Summarize the data and research questions---briefly! Just enough detail to understand what question(s) the fitted model is addressing. -->
+<!--   * Describe the statistical analysis the authors used. (Mixed-effects linear regression, logistic regression? Something more complex? Priors?) -->
+<!--   * What do they report as "results"?  Model coefficients with CIs, $p_{d}$, Bayes factors, posterior plots, model prediction plots, something else?  Illustrate with a couple screenshots. -->
+<!--   * Give a couple of questions and/or critiques you had. -->
+
+<!-- Your post can be a couple paragraphs; certainly not more than 400 words. -->
+
+## Question 1 (50%)
+
+Do **three** of the following exercises from the Hierarchical Bayesian Models chapters (Chapters [-@sec-bhm-1], [-@sec-bhm-2], [-@sec-bhm-3]) using objects there.  (You may need to copy some code here to create those objects.) You may do 1-2 more of the exercises for extra credit.
+
+1. @exr-bhm1-1, parts (a)-(b).  
+
+2. @exr-bhm1-3, part (a), with a small change: your figures *should* treat `syll1_coda` and `syll2_td` as factors.  
+  * For example, for the first plot, there should be two curves, each labeled with one level of `syll1_coda`, and the legend should show *no*/*yes*, not numeric values.
+
+3. @exr-bhm2-1, part (b)
+
+4. @exr-bhm3-1
+
+5. @exr-bhm3-2, parts (a)-(c)
+
+
+## Question 2 (50%)
+
+The dataframe `grawunder_df` contains data from @grawunder2014schaukt, another study of incomplete neutralization in German, with a similar (but not identical) design to the Roettger et al. study which the `neutralization` data is from (described in *RMLD*).^[I got this data from the OSF page for @nicenboim2018using, a meta-analysis of German incomplete neutralization across many studies.]  These predictors have the same meanings as in `neutralization`:
+
+* `vowel`
+* `place`
+* `voicing` / `voicing_fact` (of primary interest)
+* `item_pair`: 28 items
+* `subject`: 18 subjects
+
+The main difference between the studies is that Grawunder's subjects  are 19 Austrian German speakers.
+Standard German (whether in German or Austria)  has "neutralized" voicing in word-final stops, but the Tirol dialect of Austrian German  maintains a voiced/voiceless distinction; all subjects have exposure to this dialect and the standard.   All subjects heard the same words, but for some subjects words were produced in the Austrian dialect, and for others words were produced in the Standard.  This subject-level variable is indicated by `population`:
+
+* `population`: levels = Austrian German, German (9 subjects each)
+
+That is, all subjects are performing the same task---repeating words, whose vowel durations are then measured---but with the prompts spoken in different accents.  Since all subjects have exposure to both dialects (in their daily life), subjects in the 
+<!-- Standard Austrian German also has "neutralized" voicing in word-final stops, but some Austrian dialects maintain a voiced/voiceless distinction.   -->
+Austrian and German groups may differ depending on `population`, in one of several ways:
+
+1. In the effect of `voicing`
+2. In vowel duration (across all data)
+3. In the degree of individual variability in the `voicing` effect
+4. In the degree of individual variability in vowel durations (across all data)
+
+Here is an empirical plot, from which you can assess all four:
+
+```{r}
+### mean vowel duration by voicing, per subject, for Austrian and German subjects
+grawunder_df %>% ggplot(aes(x=voicing_fact, y=vowel_dur)) + 
+  stat_summary(fun.data='mean_cl_boot', geom='line', aes(group=subject)) + facet_wrap(~population)
+```
+
+(a).  Just from this plot, how do you think Austrian and German groups might differ (from 1-4)?
+
+(b). Fit a first model to the Grawunder data, using the same structure as `neutralization_10_2` from @sec-hbm2-fm, except without `prosodic_boundary` (which doesn't exist for this dataset) and with two added terms:
+
+* Fixed effect of `population`
+* Fixed effect for `population:voicing` interaction
+
+You can use the same prior for these terms as for other $\beta$ terms in `neutralization_m10_2`.
+
+(For your interpretation of the results, note the processing steps that were done above---all factors have been "centered", and `voicing` is a numeric, centered predictor.)  
+
+Call this model `grawunder_m1`.
+
+(c). Make an appropriate marginal effect plot to  understand what this model says about the most basic question here---how large is the `voicing` effect for subjects in the Austrian and German groups?   What is the 95% CredI for the `voicing` effect for an average `population`=Austrian subject? For an average `population`=German subject?
+
+(d). What does the model say about (1)?
+
+(e). Which of (1)-(4) are **not** captured by this model?  Explain why the model cannot capture this/these kind(s) of variability.
+
+
+## Question 3 (Optional)
+
+This question is worth up to 20% extra credit.
+
+(a). Make a plot of the model's predicted `vowel_dur`, by `voicing`, for each speaker, divided up by `population`. That is, it should look like the empirical plot above (except the lines come from model predictions).  Comparing to the empirical plot, how does the model prediction plot reflect your answer to the previous question? 
+
+---
+
+We consider a second model, which fits *separate* by-speaker random effects for `population`=Austrian and German subjects.  That is:
+
+* There are by-speaker intercepts, and `voicing slopes for German speakers, with one set of variances (+ one correlation)
+* There are by-speaker intercepts, and `voicing slopes for Austrian speakers, with another set of variances (+ one correlation)
+
+(b). Figure out how to fit this model,  which should be called `grawunder_m2`. Do so.^[*Hint*: this involves a small change to the  `(1+voicing|subject)` term, which would not be possible in an lme4 model.  You'll need to look beyond the lecture notes.]
+
+(c). Which terms in the model address (3) and (4)?  Explain.
+
+(d). Carry out hypothesis tests (using `hypothesis`) assessing (3) and (4) for this model.
+
+
+
+

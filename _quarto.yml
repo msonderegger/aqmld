@@ -1,0 +1,56 @@
+project:
+  type: book
+
+book:
+  title: "Advanced Quantitative Methods for Linguistic Data"
+  author: "Morgan Sonderegger, Márton Sóskuthy, Massimo Lipari, Amanda Doucette"
+  date: today
+  chapters:
+    - index.qmd
+    - bayesian-basics-1.qmd
+    - bayesian-basics-2.qmd
+    - bayesian-regression-models-1.qmd
+    - bayesian-regression-models-2.qmd
+    - bayesian-hierarchical-models-1.qmd
+    - bayesian-hierarchical-models-2.qmd
+    - bayesian-hierarchical-models-3.qmd
+    - discrete-data.qmd
+    - multivariate-models.qmd
+    - generalized-additive-models.qmd
+    - generalized-additive-mixed-models.qmd
+    - bayesian_gamms.qmd
+    - FDA_edited.qmd
+    - causal.qmd
+    # - hw1.qmd
+    # - hw3.qmd
+    # - hw5.qmd
+    - references.qmd
+
+execute: 
+  cache: true
+
+bibliography: ['aqmld_references.bib']
+
+format:
+  html:
+    theme: cosmo
+    number-sections: true
+    filters:
+      - webr
+
+
+  pdf:
+    documentclass: scrreprt
+    
+knitr:
+  opts_chunk: 
+    collapse: true
+    echo: true
+    fig.asp:  2/3
+    fig.show: hold
+
+editor: visual
+
+
+
+

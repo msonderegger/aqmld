@@ -1,0 +1,971 @@
+# Bayesian Regression Models 2 
+
+These lecture notes cover topics from:
+
+- @mcelreath2020statistical Sec. 7.3-7.5.1, 9.3, 9.4-9.5
+- @kurz2021statistical, same sections (7.3-7.5.1, ...)
+- To review as necessary: Sec. 7.2 and 7.3 of *RMLD* [@rmld-book] 
+  - On contrast coding and post-hoc tests for frequentist models
+  - Assumed as background for @sec-brm2-contrasts below. 
+
+The McElreath/Kurz reading above is overkill if you just want to understand the basics of model quality metrics and model diagnostics, illustrated in this file.  It will give you a good background in exactly what these metrics/diagnostics are doing, but some students don't find this useful.  TODO for the future: list two possible readings from McElreath, for less and more detail.
+
+Topics:
+
+- Model quality metrics
+- Checking a fitted model
+  - Posterior plots
+  - MCMC diagnostics
+- Multi-level factors and contrasts
+
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE}
+library(tidyverse)
+library(brms)
+
+library(broom) # for tidy model summaries
+
+library(tidybayes)
+library(bayestestR)
+
+library(languageR) # for `english' dataset
+library(arm)
+
+library(bayesplot)
+library(loo)
+
+library(emmeans) # for working with multi-level factors
+```
+
+::: {.callout-tip  collapse="true"}
+## Practical note
+If you have loaded `rethinking`, you need to detach it
+before using brms. See  @kurz2021statistical Sec. 4.3.1.
+
+I use the `file` argument when fitting `brms` models to make compiling this document easier (so the models don't refit every time I compile). You may or may not want to do this for your own models. See `file` and `file_refit` arguments in `?brm`.
+
+:::
+
+We'll make greater use today of the [bayesplot](https://mc-stan.org/bayesplot/) package, which we previously used for posterior predictive checks (@sec-bb2).  This package also has extensive functionality for plotting MCMC draws and plotting MCMC diagnostics (such as trace plots), as covered in useful 
+[vignettes](https://mc-stan.org/bayesplot/articles/index.html) and the bayesplot paper [@gabry2019visualization].  
+
+
+
+We'll start using the  [loo](http://mc-stan.org/loo/reference/loo-package.html) package @loo-package, which implements methods for calculating model quality criteria from @vehtari2017practical that use "pointwise out-of-sample prediction accuracy": LOO-CV and WAIC. See  [vignette](https://mc-stan.org/loo/articles/loo2-example.html).
+
+### Datasets
+
+Load the `diatones` dataset and perform some data cleaning and recoding (see @sec-bb1-prelim, @sec-brm1-datasets):
+
+
+```{r}
+diatones <- read.csv("https://osf.io/tqjm8/download", stringsAsFactors = TRUE)
+
+# make numeric versions of all categorical predictors, while saving original versions
+diatones <- diatones %>% mutate(
+  syll1_coda_orig = syll1_coda,
+  syll2_coda_orig = syll2_coda,
+  syll2_td_orig = syll2_td,
+  ## turns no/yes -> 0/1
+  syll1_coda = ifelse(syll1_coda == "no", 0, 1),
+  ## turns '0'/'C'/'CC'/'CCC' -> 0/1/2/3
+  syll2_coda = str_count(syll2_coda_orig, "C"),
+  syll2_td = ifelse(syll2_td == "no", 0, 1)
+)
+
+## standardize all predictors using arm::rescale
+diatones <- diatones %>% mutate(
+  syll1_coda = rescale(syll1_coda_orig),
+  syll2_td = rescale(syll2_td_orig),
+  syll2_coda = rescale(syll2_coda),
+  frequency = rescale(frequency)
+)
+```
+
+We also will use the `english` dataset from languageR, defining $n=250$ and $n = 25$ subsets after centering variables we'll use in models below---all as in previous chapters.
+
+```{r}
+# center predictors
+english <- mutate(english,
+  WrittenFrequency_c = scale(WrittenFrequency, scale = FALSE),
+  Familiarity_c = scale(Familiarity, scale = FALSE),
+  SubjectYoung = as.numeric(AgeSubject) - 1.5
+)
+
+## set seed, so you'll get the same "random" sample
+set.seed(100)
+english_250 <- english[sample(1:nrow(english), 250), ]
+
+## set seed, so you'll get the same "random" sample
+set.seed(10)
+english_25 <- english[sample(1:nrow(english), 25), ]
+```
+
+Finally, we load the `french_cdi_24` dataset. It is described in Sec. 7.1.1. of *RMLD* (and in @sec-hw1 of this e-book), where you can learn more if needed. 
+
+```{r}
+french_cdi_24 <- read.csv(file = "https://osf.io/uhd2n/download", stringsAsFactors = TRUE)
+```
+
+Perform pre-processing described in Sec. 7.1.1. of *RMLD*:
+
+```{r}
+french_cdi_24 <- filter(french_cdi_24, data_id == 140275) %>%
+  filter(lexical_class != "other") %>%
+  mutate(lexical_class = fct_relevel(lexical_class, "function_words", "verbs", "adjectives", "nouns")) %>%
+  droplevels()
+```
+
+This restricts the data to a single child (140275), aged 24 months, and relevels `lexical_class` in the theoretically-expected order.
+
+
+
+
+## Model quality metrics {#sec-model-quality}
+
+Summarizing @mcelreath2020statistical Sec. 7.4:
+
+The ideal for model quality metrics is out-of-sample deviance. This can never be computed, so we approximate using *leave-one-out-cross-validation*. This is usually impractical to compute---it would require refitting the model $n$ times, where $n$ = number of observations. So we approximate, in one of two ways
+
+-   *PSIS-LOO-CV* ("Pareto-smoothed importance-sampling leave-one-out cross-validation"), a.k.a. *PSIS*
+  - Implemented as `loo()` in the loo package
+-   *WAIC* ("Widely-applicable information criterion")
+  - Implemented as `waic()`
+
+In principle, these are different approaches, based on cross-validation versus calculating an *information criterion*, analagous to AIC/BIC for frequentist models.  In practice, both PSIS and WAIC measure the same thing (out-of-sample deviance), and the larger the dataset, the more similar they will be.  
+
+If they give different qualitative results (with no errors in WAIC/PSIS calculation) you should be circumspect.
+
+
+::: {.callout-tip  collapse="true"}
+## Practical note: PSIS or WAIC?
+
+Which of PSIS or WAIC should actually be used for model comparison in a concrete case?   McElreath notes that PSIS and WAIC may each be better for different model types (Sec. 7.4.3), but seems to recommend defaulting to PSIS, because it "has a distinct advantage in warning the user about when it is unreliable" via the $k$-values it computes for each observation. 
+However, WAIC is faster to compute---much faster, for large datasets or complex models---and the current WAIC implementation in loo also reports when it's probably unreliable (and recommends using PSIS instead).
+
+My usual workflow for model comparison is:
+
+1. First use WAIC
+2. If there are warnings, switch to PSIS (a.k.a. "loo", in the loo package)
+3. If there are warnings about Pareto $k$ values being too large, follow the package's recommendation to compute PSIS with moment matching instead (see `?loo_moment_match`).
+
+My understanding is that Options 1--3 are (usually) progressively more accurate and slower.  
+:::
+
+
+
+### Example: nonlinear effect of `WrittenFrequency` {#sec-example-nonlinear}
+
+This section assumes as background the introduction to non-linear effects of predictors in Sec. 7.5 of *RMLD*, especially Sec. 7.5.3, where a similar example for frequentist linear regression is given.
+
+
+The empirical effect of frequency (`WrittenFrequency`) on reaction time (`RTlexdec`) for the `english_250` data is:
+
+```{r}
+#| code-fold: true
+
+english_250 %>% ggplot(aes(x = WrittenFrequency, y = RTlexdec)) +
+  geom_point() +
+  geom_smooth(aes(color = AgeSubject))
+```
+
+It's not immediately clear here whether the effect is linear or non-linear, and what degree the non-linear effect would be.
+
+We assess this by comparing models fit with `AgeSubject` and different effects of `WrittenFrequency`:
+
+-   Linear effect of `WrittenFrequency` (equivalent to `english_m43` from @sec-mult-lin-reg)
+-   Polynomial effect of `WrittenFrequency`, degree=2 (quadratic)
+-   Polynomial effect of `WrittenFrequency`, degree=3 (cubic)
+-   Polynomial effect of `WrittenFrequency`, degree=4 (quartic)
+
+Fit these models, using the same priors as in @sec-mult-lin-reg: 
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+prior_1 <- c(
+  prior(normal(0, 100), class = Intercept),
+  prior(normal(0, 5), class = b),
+  prior(exponential(1), class = sigma)
+)
+
+english_m51 <-
+  brm(
+    data = english_250,
+    RTlexdec ~ 1 + WrittenFrequency_c + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m51.brm"
+  )
+
+english_m52 <-
+  brm(
+    data = english_250,
+    RTlexdec ~ 1 + poly(WrittenFrequency_c, 2) + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m52.brm"
+  )
+
+
+english_m53 <-
+  brm(
+    data = english_250,
+    RTlexdec ~ 1 + poly(WrittenFrequency_c, 3) + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m53.brm"
+  )
+
+english_m54 <-
+  brm(
+    data = english_250,
+    RTlexdec ~ 1 + poly(WrittenFrequency_c, 4) + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m54.brm"
+  )
+```
+
+While the `loo()` and `waic()` functions can be applied to a fitted model to calculate PSIS or WAIC, the recommended workflow is instead  to add them to the fitted model using `add_criterion()`. This saves the specified criterion to the model file (indicated by the `file` argument when you fit the model) so it is only calculated once per fitted model.  This is useful because PSIS/WAIC take a lot of time to compute, especially for more complex models.
+
+
+```{r, message=FALSE}
+## add both WAIC and LOO
+english_m51 <- add_criterion(english_m51, c("waic", "loo"))
+english_m52 <- add_criterion(english_m52, c("waic", "loo"))
+english_m53 <- add_criterion(english_m53, c("waic", "loo"))
+english_m54 <- add_criterion(english_m54, c("waic", "loo"))
+```
+
+Example WAIC and LOO output for one model:
+
+```{r}
+waic(english_m53)
+loo(english_m53)
+```
+
+The most important output here is:
+
+- The Estimate and SE of PSIS (a.k.a. "LOO") and WAIC, in the `waic` and `looic` rows.  
+  - Note that a rough 95% CredI of WAIC or PSIS would be  Estimate +- 1.96\*SE.
+- Pareto $k$ estimates
+  - These values, one per observation, go into the calculation of PSIS-LOO. 
+  - When $k>$ some threshold, by default 0.7, LOO is unreliable.
+  - Observations with $k>$ threshold are influential/potential "outliers".
+  
+Other output is less important.^[ `elpd_waic` is just WAIC/(-2)---it's in units of log-probability rather than "deviance". This doesn't matter for model comparison. `p_waic` is the effective number of model parameters. It's not usually used, but can be more intuitive than ELPD/WAIC. Note that the model has 5.2 "effective" parameters, despite having 6 actual parameters, suggesting that some of them are not doing much. `elpd_loo`/`p_loo` are analogous to the same for WAIC.]
+
+
+Note how similar LOO and WAIC are for this dataset, as expected for large enough $n$ (here, $n=250$).
+
+These metrics can be used for model comparison via the `loo_compare()` function from loo:
+
+```{r}
+loo_compare(english_m51, english_m52, english_m53, english_m54, criterion = "waic")
+loo_compare(english_m51, english_m52, english_m53, english_m54, criterion = "loo")
+```
+
+For example: the difference in deviance (ELPD) based on WAIC between the cubic (`english_m53`) and quadratic (`english_m52`) models is 0.6, with standard error of 1.4. Thus, a rough 95% CredI for this difference in deviance is $[0.6 - 1.96*1.4, 0.6 + 1.96*1.4]$ = $[-2.1, 3.3]$.
+
+In terms of LOO or WAIC, the cubic model (`english_m53`) wins: it has lower LOO than model `english_52` by 0.6, which is lower than `english_m54` by 0.2 (difference between 0.8 and 0.6), and so on.  So we'd **choose the cubic model**.
+
+The SE values suggest a slightly more complex picture: the 95% CIs for the difference in deviance with the next-best model (quadratic) or the least-good model (linear) overlap, but the 95% CI with the next-next-best model (quartic) does not:
+
+```{r}
+# 95% CI of diff: overlaps 0
+loo_compare(english_m53, english_m52)
+# 95% CI of diff: doesn't overlap 0
+loo_compare(english_m53, english_m54)
+# 95% CI of diff: overlaps 0
+loo_compare(english_m53, english_m51)
+```
+
+The most conservative option would be to just **choose the linear model** (`english_m51`), which doesn't differ from any nonlinear model by the 95% CredI method:
+
+```{r}
+## 95% CredI all overlap 0
+loo_compare(english_m53, english_m51)
+loo_compare(english_m52, english_m51)
+loo_compare(english_m54, english_m51)
+```
+
+
+When it is of interest to choose a single "best" model", **both methods are used in current practice**:
+
+- Choose model with lowest WAIC/PSIS
+- Choose the simplest model using 95% CredI on WAIC/PSIS differences.
+
+The second method is more conservative.  
+
+
+::: {.callout-tip  collapse="true"}
+## Broader context: Using PSIS/WAIC for model selection
+
+The two methods above---choosing the model with lowest PSIS (or WAIC) versus choosing the model which beats others by at least 2 SE---can be thought of as two options on a continuum, where you choose the best model depending on which one beats others by at least X SE (where X = 0 or 2).  There is no right answer here, and no reason you need to be restricted to X = 0 or 2.  These are just conventional choices for how conservative you want to be, like the commonly used AIC and BIC for frequentist models just correspond to different penalty terms in "data likelihood minus penalty".
+
+In fact, there is no reason you need to choose a "best model"---McElreath advises against it.   @flego2021leveraging is a nice example from phonetics where different X are used to differentiate between models which are more and less likely for the shape of vowel formant trajectories (linear, quadratic,  an interpolation between two points, etc.).    
+
+An interesting option is *model averaging*, where instead of choosing a best model, you ask, "what combination of a set of models best predicts the data", to get a weight for each model (where the weights add up to one).  This is implemented in the loo package (see `?loo_model_weights`).
+
+For example, for the four models considered above:
+
+```{r}
+loo_model_weights(english_m51, english_m52, english_m53, english_m54)
+```
+
+The data is best described as 77% the cubic model, 17% the quadratic model, and 6% the linear model.  
+ 
+:::
+
+
+For comparison, shown in @sec-brm2-extra: when we compare frequentist linear regression models for the same case, we get that the linear model or cubic model are best, depending on the method used for model comparison (e.g. AIC vs. BIC).
+
+
+<!-- ```{r, results=FALSE, message=FALSE, warning=FALSE} -->
+
+<!-- english_m54 <- -->
+
+<!--   brm(data = english_25, -->
+
+<!--       RTlexdec ~ 1 + WrittenFrequency_c + SubjectYoung, -->
+
+<!--       family = gaussian, -->
+
+<!--       prior = c(prior(normal(0, 100), class=Intercept), -->
+
+<!--                 prior(normal(0,5), class=b), -->
+
+<!--                 prior(exponential(1), class = sigma) -->
+
+<!--       ), -->
+
+<!--       file='models/english_m54.brm' -->
+
+<!--   ) -->
+
+<!-- english_m55 <- -->
+
+<!--   brm(data = english_25, -->
+
+<!--       RTlexdec ~ 1 + poly(WrittenFrequency_c,2) + SubjectYoung, -->
+
+<!--       family = gaussian, -->
+
+<!--       prior = c(prior(normal(0, 100), class=Intercept), -->
+
+<!--                 prior(normal(0,5), class=b), -->
+
+<!--                 prior(exponential(1), class = sigma) -->
+
+<!--       ), -->
+
+<!--       file='models/english_m55.brm' -->
+
+<!--   ) -->
+
+<!-- english_m56 <- -->
+
+<!--   brm(data = english_25, -->
+
+<!--       RTlexdec ~ 1 + poly(WrittenFrequency_c,3) + SubjectYoung, -->
+
+<!--       family = gaussian, -->
+
+<!--       prior = c(prior(normal(0, 100), class=Intercept), -->
+
+<!--                 prior(normal(0,5), class=b), -->
+
+<!--                 prior(exponential(1), class = sigma) -->
+
+<!--       ), -->
+
+<!--       file='models/english_m56.brm' -->
+
+<!--   ) -->
+
+<!-- english_m54 <- add_criterion(english_m54, c('waic', 'loo')) -->
+
+<!-- english_m55 <- add_criterion(english_m55,c('waic', 'loo')) -->
+
+<!-- english_m56 <- add_criterion(english_m56, c('waic', 'loo')) -->
+
+<!-- loo(english_m54, english_m55, english_m56) -->
+
+<!-- loo(english_m54) -->
+
+<!-- ``` -->
+
+
+::: {#exr-brm2-1}
+
+
+a. Fit the same four models as above, but now to `english_25`, and recalculate LOO/WAIC.
+
+b. Which model is best, in terms of LOO?
+
+c. What conclusion do the 95% CIs of LOO differences suggest?
+
+d. Does this conclusion fit your intuition from plotting the data `geom_smooth()` of `WrittenFrequency` vs `RTlexdec`)?  If you get different answers for (b) and (c), which better fits this plot?
+
+e. Your "best model" from (b) should be different from the `english_250` case. Why is this?
+
+f. *Extra*: Try (a)--(d) for a model fit to the entire `english` dataset.  (You should now find clear evidence for a nonlinear effect.)
+
+<!-- f.  *Extra* Make an analogous plot (to @exr-brm2-1(d)) for the `english_250` data, and compare to the results of (1) the Bayesian model comparison and (2) the frequentist model comparison we performed above. Does one better match your intuition from plotting the data? -->
+
+:::
+
+<!-- ```{r} -->
+
+<!-- ## these are equivalent to mlogreg_mod_1, mlogreg_mod_2, mlogreg_mod_3 in RMLD Ch. 6 -->
+
+<!-- diatones_m51 <-brm(data = diatones, -->
+
+<!--                    stress_shifted | trials(1) ~ syll2_coda + syll2_td + frequency + syll1_coda, -->
+
+<!--                    family = binomial, -->
+
+<!--                    prior = c(prior(normal(0,5), class=Intercept), -->
+
+<!--                              prior(normal(0,3), class=b)), -->
+
+<!--                    file='models/diatones_m41.brm') -->
+
+<!-- diatones_m52 <-brm(data = diatones, -->
+
+<!--                    stress_shifted | trials(1) ~ frequency*(syll2_coda + syll2_td + syll1_coda), -->
+
+<!--                    family = binomial, -->
+
+<!--                    prior = c(prior(normal(0,5), class=Intercept), -->
+
+<!--                              prior(normal(0,3), class=b)), -->
+
+<!--                    file='models/diatones_m52.brm') -->
+
+<!-- diatones_m53 <-brm(data = diatones, -->
+
+<!--                    stress_shifted | trials(1) ~ frequency*(syll2_td + syll1_coda) + syll2_coda, -->
+
+<!--                    family = binomial, -->
+
+<!--                    prior = c(prior(normal(0,5), class=Intercept), -->
+
+<!--                              prior(normal(0,3), class=b)), -->
+
+<!--                    file='models/diatones_m53.brm') -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- loo(diatones_m51, diatones_m52, diatones_m53) -->
+
+<!-- ``` -->
+
+
+## Checking a fitted model
+
+Once fitted, a model needs to be checked to be confident in its results.  Methods for this are discussed in McElreath Sec. 9.4-9.5.
+
+
+### Posterior plots
+
+The most basic visual check of a fitted model is examining the posterior distribution of model parameters:
+
+1. Each parameter's (marginal) distribution
+2. Pairwise distributions
+
+(1) is crucial, while (2) is nice but not always feasible as the number of parameters increases.
+
+Let's see examples of what these plots look like for a "good" model, and then one where something has gone wrong.
+
+#### Example: good model
+
+Consider model `english_m53`, the "cubic" model chosen in @sec-example-nonlinear as having the lowest WAIC/PSIS. We first plot the (marginal) posterior distribution of each parameter, using `mcmc_plot()` from brms---this is a convenience function for calling MCMC plotting functions from the bayesplot package on brms models.
+
+```{r}
+mcmc_plot(english_m53, type = "hist", bins = 20)
+```
+
+Now consider pairwise posterior distributions, restricting just to parameter starting with `b` (which are the regression coefficients):
+```{r}
+mcmc_pairs(english_m53,
+  regex_pars = "^b",
+  off_diag_args = list(size = 1 / 5, alpha = 1 / 5)
+)
+```
+
+Here we use `mcmc_pairs()`, one of [several functions](https://cran.r-project.org/web/packages/bayesplot/vignettes/plotting-mcmc-draws.html#Bivariate_plots) for bivariate posterior distribution summaries provided by bayesplot. 
+
+It is visually clear that there are enough samples to tell the shape of each marginal and pairwise distribution (ellipses/bell curves = multivariate Gaussians).
+
+
+#### Example: bad model
+
+What would posteriors plots (here) and MCMC diagnostics (next section) look like for a model where we hadn't sampled for long enough, or there was a problem with the model specification?
+
+Let's use the high-collinearity example model from @sec-brm1-collinearity (`english_collin_m1`), but now refit using:
+
+-   4 chains
+-   **100** samples, of which 25/75 are warmup/real samples.
+
+This is obviously too few samples, but this will let us see what plots for a bad model look like.
+
+Fit this model:
+
+```{r}
+# make sure you get the same "random" result:
+set.seed(100)
+english_iter100_m51 <-
+  brm(
+    data = english_25,
+    RTlexdec ~ 1 + WrittenFrequency_c + Familiarity_c + SubjectYoung,
+    family = gaussian,
+    prior = c(
+      prior(normal(0, 100), class = Intercept),
+      prior(normal(0, 5), class = b),
+      prior(exponential(1), class = sigma)
+    ), iter = 100, warmup = 25,
+    file = "models/english_iter100_m51"
+  )
+```
+
+Model output:
+```{r}
+english_iter100_m51
+```
+
+
+There is a lot of output here suggesting this is not a good fit, discussed more below (@sec-ex-bad-model-2). For the moment, consider marginal and pairwise posterior plots:
+
+```{r}
+mcmc_plot(english_iter100_m51, type = "hist", bins = 20)
+
+## plot just parameters starting with 'b' or 'sig'(regression coeffs, sigma):
+mcmc_pairs(english_iter100_m51,
+  regex_pars = "^(b|sig)",
+  off_diag_args = list(size = 0.75, alpha = 0.5)
+)
+```
+
+These plots do not look like enough samples have been taken to approximate the distribution, for most parameters.
+
+See the bayesplot [vignette](https://cran.r-project.org/web/packages/bayesplot/vignettes/plotting-mcmc-draws.html) for various functions for plotting MCMC draws (from the posterior).
+
+::: {#exr-brm2-4}
+
+In @sec-brm1-beta1-prior, we made a "hex plot" showing the bivariate posterior distribution of two coefficients for model `english_m41`.  This exercise is to make a similar hex plot for the high-colinearity example model from @sec-brm1-collinearity (`english_collin_m1`).
+
+a. Figure out what **bayesplot function** is used to make this kind of plot.
+
+b. What are the names of the regression coefficients in model `english_collin_m1` corresponding to the predictors for word frequency (`WrittenFrequency_c`) and familiarity (`Familiarity_c`)?
+
+c. Apply the function from  (a) to `english_coliln_m1` (which you'll have to load or re-fit) to show a hex plot for the predictors from (b).
+
+:::
+
+
+### MCMC Diagnostics
+
+We will show plots of some MCMC diagnostics mentioned in brms output:
+
+-   Rhat: measures *mixing* of chains---related to ratio of within-chain versus between-chain variance of samples.
+    -   We want Rhat near 1 for all parameters. Rhat above 1.1 or 1.05 is cause for concern (though these are arbitrary cutoffs).
+-   ESS: effective sample size, measures how *independent* samples within the same chain are (degree of autocorrelation).
+    -   ESS $<$ "total post-warmup draws" = some autocorrelation. Not a problem, necessarily, but we'll need more samples to summarize the posterior. ESS far below "total post-warmup draws" suggests a problem.
+    -   ESS $>$ "total post-warmup draws" = anticorrelated samples. This is great, but not necessary.
+    
+
+The [bayesplot vignette](https://mc-stan.org/bayesplot/articles/visual-mcmc-diagnostics.html) on MCMC diagnostics is very useful and informative. We will show just a few kinds of plots demonstrated there,  using the `mcmc_plot()` function from brms that interfaces with bayesplot.^[For example, `mcmc_plot(my_brms_model, type = 'trace')` shows the same thing as `mcmc_plot(my_rstan_model)`. [This section](https://bookdown.org/content/4857/markov-chain-monte-carlo.html#care-and-feeding-of-your-markov-chain) of @kurz2021statistical shows how to use the actual bayesplot functions with brms models.]
+
+#### Example: good model
+
+First, some plots for a well-behaved model: `english_m53`, our cubic effect of `WrittenFrequency` model, fitted with default brms settings:
+
+-   4 chains
+-   Each chain has 1000 warmup and 1000 post-warmup draws
+-   Total post-warmup draws: 4000
+
+Trace plots:
+
+```{r}
+mcmc_plot(english_m53, type = "trace") +
+  ## the following two lines just make the output legible, and
+  ## are optional
+  theme(strip.text = element_text(size = 10)) +
+  facet_wrap(~parameter, nrow = 3, ncol = 2, scales = "free")
+```
+
+*Autocorrelation plots*, for samples from the posterior for model parameters:
+
+```{r}
+mcmc_plot(english_m53, type = "acf") +
+  ## following line just makes the output more legible
+  ## / is optional
+  theme(strip.text = element_text(size = 8))
+```
+
+*$\hat{R}$ plot*, showing Rhat values for each model parameter:
+
+```{r}
+mcmc_plot(english_m53, type = 'rhat') +
+  ## adds parameter names on y-axis
+  yaxis_text(hjust = 1)
+```
+
+These values of $R_{hat}$ are fine---none is anywhere near the 1.05 cutoff.
+
+
+Since realistic (e.g. mixed-effects) models have dozens-hundreds of parameters, the default display for an rhat plot doesn't show any labels (just take out the `yaxis_text(hjust = 1)` line above to see this.)
+
+*ESS plot* (i.e., $n_{eff}$) for each coefficient:
+
+```{r}
+neff_ratio(english_m53) %>% mcmc_neff(size = 2) + yaxis_text(hjust = 1)
+```
+
+Sampling is very efficient ($N_{eff}/N > 0.5$).
+
+
+::: {#exr-brm2-5}
+## Extra
+
+The $\hat{R}$ and ESS plots above would be cleaner if they (a) just showed fitted model parameters (regression coefficients and $\sigma$), and (b) put the parameters in a sensible order: Intercept, then other `b_` parameters, then `sigma`.
+
+Figure out how to make versions of these plots implementing (a) and (b).  
+
+This is good practice in either reading documentation or interacting with a chatbot (ChatGPT or GitHub Copilot).
+
+:::
+
+#### Example: bad model {#sec-ex-bad-model-2}
+
+Trace plots:
+
+```{r}
+mcmc_plot(english_iter100_m51, type = "trace") +
+  ## the following lines is optional / makes the output legible
+  theme(strip.text = element_text(size = 8))
+```
+
+These do not look like hairy caterpillars:
+
+-   The chains have not mixed---they are not on top of each other (for some parameters, like sigma, SubjectYoung)
+-   They are not stationary: there is a definite trend in e.g. the sigma chains, as opposed to flat horizontal lines, with lots of vertical "hair" indicating effective sampling.
+- They include many divergences (as also indicated in the model output above).
+
+::: {#exr-brm2-2}
+
+
+a.  Make the other diagnostic plots as above, now for model `english_iter100_m51`. What problems do you see?
+
+b.  Which parameter(s) are particularly poorly estimated by the model, or otherwise problematic?
+
+:::
+<!-- ```{r} -->
+
+<!-- english_iter200_m51 <- -->
+
+<!--   brm(data = english_25, -->
+
+<!--       RTlexdec ~ 1 + WrittenFrequency_c + Familiarity_c + SubjectYoung, -->
+
+<!--       family = gaussian, -->
+
+<!--       prior = c(prior(normal(0, 100), class=Intercept), -->
+
+<!--                 prior(normal(0,5), class=b), -->
+
+<!--                 prior(exponential(1), class = sigma) -->
+
+<!--       ), iter=200, -->
+
+<!--       file='english_iter200_m51' -->
+
+<!--   ) -->
+
+<!-- ``` -->
+
+<!-- - Reff for sigma > 1.25 -->
+
+<!-- - neff/N also low -->
+
+<!-- ```{r} -->
+
+<!-- posterior_samples(french_cdi_m52, add_chain = TRUE) %>%  mutate(Chain=chain)  %>% -->
+
+<!-- dplyr::select(matches("(b_|sig|chai)")) %>%  mcmc_pairs(diag_fun='dens') -->
+
+<!-- ``` -->
+
+::: {#exr-brm2-6}
+
+## Extra
+
+a. Refit the model with `iter=200`, `warmup=100`. What parameter(s) are still problematic?^[(Don't read until you've answered.). This illustrates a very general fact about regression models: estimating means (the "population-level effects") takes less data / sampling from the posterior than estimating variances (here, "Family-specific parameters").]
+
+b. Try to install the `shinystan` package, and run `shinystan::launch_shinystan()` on one of your models to explore MCMC diagnostics.
+
+:::
+
+
+
+## Working with multi-level factors and contrasts {#sec-brm2-contrasts}
+
+This is conceptually similar to frequentist models, covered in Chap. 7 of @rmld-book.  Any multi-level factor requires choosing a contrast coding scheme, and it is possible to interpret the fitted model either by interpreting the coefficient corresponding to a contrast (e.g. "level 2 minus level 1": *RMLD* Sec. 7.2), or using post-hoc tests (*RMLD* Sec. 7.3).
+
+In a Bayesian regression model, a "post-hoc test" can be thought of as summarizing the posterior:
+
+-   To ask the model, "What is the predicted difference in $y$ between level 2 and level 1 of factor $x$?" :
+    -   Calculate many times using the posterior: predictions for $y$ when $x$ = level 1 and $x$ = level2, with other predictors held constant. (That is, choose a draw of the model coefficients, then use these to calculate the two predictions.)
+    -   Calculate the difference in these predictions, $\delta$, for each posterior draw.
+    -   Summarize the posterior distribution of $\delta$ as desired (e.g. mean + 95% CI).
+
+Let's use as an example the `french_cdi_24` data. We recode `lexical_class` using Helmert contrasts (*RMLD* Sec. 7.2.8):
+
+```{r}
+contrasts(french_cdi_24$lexical_class) <- contr.helmert(4)
+```
+
+Now, fit a Bayesian model like `cdi_cc_mod_1`, the frequentist (logistic regression) model described there. We'll use similar "uninformative" priors to the `diatones` model (@sec-brm1-logistic), which also used logistic regression.^[In a real model of this data we'd want to figure out weakly informative priors, but it will make no difference given the size of this dataset.]
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+french_cdi_m51 <- brm(
+  data = french_cdi_24,
+  produces | trials(1) ~ lexical_class,
+  family = binomial,
+  prior = c(
+    prior(normal(0, 5), class = Intercept),
+    prior(normal(0, 3), class = b)
+  ), file = "models/french_cdi_m51"
+)
+```
+
+```{r}
+french_cdi_m51
+```
+
+We could do the whole process described above by getting model predictions for each level of `lexical_class`, for many posterior distributions (e.g. using `spread_draws()` from tidybayes). Instead we can use the emmeans package, which works with `brms` models analogously to its use with frequentist models. See @sec-brm1-marginal (and the "Practical note" box there) for more on emmeans / similar packages for computing "marginal effects".
+
+
+To test for pairwise differences ("Tukey HSD") between levels, for example:
+
+```{r}
+emm1 <- emmeans(french_cdi_m51, ~lexical_class)
+contrast(emm1, "tukey")
+```
+
+We might say the 95% HPDs which don't overlap zero correspond to levels which "are different", so:
+
+-   function_words $<$ verbs, adjectives, nouns
+-   verbs $<$ nouns
+
+Visualize the actual posterior of these differences (code from [here](https://gist.github.com/jebyrnes/d1bdea4ad4c8736c4b9e7ac290e8c940)), using the `gather_emmeans_draws()` function from tidybayes:
+
+```{r}
+cont <- contrast(emm1, "tukey")
+cont_posterior <- gather_emmeans_draws(cont)
+
+ggplot(
+  cont_posterior,
+  aes(y = contrast, x = .value, fill = contrast, group = contrast)
+) +
+  geom_halfeyeh(alpha = 0.5) +
+  geom_vline(xintercept = 0, color = "red", lty = 2)
+```
+
+Another plot, by level:
+
+```{r}
+french_cdi_m51 %>%
+  emmeans(~lexical_class) %>%
+  gather_emmeans_draws() %>%
+  ggplot(aes(x = lexical_class, y = .value)) +
+  geom_eye() +
+  stat_summary(aes(group = NA), fun.y = mean, geom = "line") +
+  theme_light()
+```
+
+Compare to frequentist model:
+
+```{r}
+cdi_cc_mod_1 <- glm(produces ~ lexical_class, data = french_cdi_24, family = "binomial")
+tidy(cdi_cc_mod_1, conf.int = TRUE)
+```
+
+```{r}
+contrast(emmeans(cdi_cc_mod_1, ~lexical_class), "tukey")
+```
+
+Note that the Bayesian method does **not** explicitly correct for multiple comparisons, in part because there are no hypothesis tests per se in a (fully) Bayesian framework. How/whether to correct for "multiplicity" in Bayesian models is a big [debate](https://stats.stackexchange.com/questions/203378/why-dont-bayesian-methods-require-multiple-testing-corrections), but the short answer is that:
+
+-   Making multiple comparisons using the posterior will often give a similar result to a frequentist procedure where multiple comparisons are explicitly corrected for.
+-   In common cases, emmeans will do something sensible for you.
+
+::: {#exr-brm2-3}
+
+## Extra
+
+It may be of interest to calculate other summaries of this child's lexical knowledge than can be easily calculated by emmeans. Suppose we were interested in the noun/verb ratio: the odds of knowing a word if it's a noun ($p_{noun}$/($1-p_{noun}$)), divided by the odds of knowing a word if it's a verb.
+
+a.  Sample from the posterior, at each draw getting predicted values for each level of `lexical_class`, in *probability*
+
+b.   For each draw, calculate $p_{noun}$ and $p_{verb}$, and add these to the dataframe.
+
+c.  For each draw, calculate the "noun/verb ratio" defined above.
+
+d.   Plot the posterior distribution of the N/V ratio.
+:::
+
+## Extra {#sec-brm2-extra}
+
+### Frequentist models for nonlinear effect of `WrittenFrequency`
+
+Fit frequentist linear models corresponding to Bayesian models in @sec-example-nonlinear:
+
+```{r}
+english_m51_freq <- lm(RTlexdec ~ 1 + WrittenFrequency_c + SubjectYoung, data = english_250)
+english_m52_freq <- lm(RTlexdec ~ 1 + poly(WrittenFrequency_c, 2) + SubjectYoung, data = english_250)
+english_m53_freq <- lm(RTlexdec ~ 1 + poly(WrittenFrequency_c, 3) + SubjectYoung, data = english_250)
+english_m54_freq <- lm(RTlexdec ~ 1 + poly(WrittenFrequency_c, 4) + SubjectYoung, data = english_250)
+```
+
+Choose the best model using  $F$-tests, AIC, or BIC for model comparison:
+
+```{r}
+
+anova(english_m51_freq, english_m52_freq, english_m53_freq, english_m54_freq)
+AIC(english_m51_freq, english_m52_freq, english_m53_freq, english_m54_freq)
+BIC(english_m51_freq, english_m52_freq, english_m53_freq, english_m54_freq)
+```
+
+-   BIC or $F$-tests: linear model best
+-   AIC: cubic model best
+
+
+## Solutions
+
+### @exr-brm2-1
+
+a.
+
+```{r}
+english_m51_25 <-
+  brm(
+    data = english_25,
+    RTlexdec ~ 1 + WrittenFrequency_c + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m51_25.brm"
+  )
+
+english_m52_25 <-
+  brm(
+    data = english_25,
+    RTlexdec ~ 1 + poly(WrittenFrequency_c, 2) + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m52_25.brm"
+  )
+
+
+english_m53_25 <-
+  brm(
+    data = english_25,
+    RTlexdec ~ 1 + poly(WrittenFrequency_c, 3) + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m53_25.brm"
+  )
+
+english_m54_25 <-
+  brm(
+    data = english_25,
+    RTlexdec ~ 1 + poly(WrittenFrequency_c, 4) + SubjectYoung,
+    family = gaussian,
+    prior = prior_1,
+    file = "models/english_m54_25.brm"
+  )
+```
+
+```{r}
+english_m51_25 <- add_criterion(english_m51_25, c("waic", "loo"), moment_match = TRUE)
+english_m52_25 <- add_criterion(english_m52_25, c("waic", "loo"), moment_match = TRUE)
+english_m53_25 <- add_criterion(english_m53_25, c("waic", "loo"), moment_match = TRUE)
+english_m54_25 <- add_criterion(english_m54_25, c("waic", "loo"), moment_match = TRUE)
+```
+
+Note that I've applied moment matching, following the warning message you get if you don't do this. 
+
+b.
+
+Which model is best,in terms of LOO?
+
+```{r}
+loo_compare(english_m51_25, english_m52_25, english_m53_25, english_m54_25, criterion = "waic")
+```
+
+The linear model wins.  But it would be more precise to say that the linear, quartic, and quadratic models all fit roughly equally well (ELPD differences are well within 2 `se_diff` of the "best" model). We can't tell from this much data whether the effect is linear or nonlinear.  This makes sense, if you look at an empirical plot:
+
+```{r}
+english_25 %>% ggplot(aes(x = WrittenFrequency, y = RTlexdec)) +
+  geom_point() +
+  geom_smooth(aes(color = AgeSubject))
+```
+
+
+Note that it would not be correct here to use "Occam's razor" and say that since no model is clearly better than the simplest one (linear model: `english_m51_25`), it wins.  The LOO/WAIC calculation has already taken model complexity into account.
+
+
+### @exr-brm2-2
+
+Here are a couple diagnostic plots that show problems:
+
+```{r}
+mcmc_plot(english_iter100_m51, type = 'rhat') +
+  ## adds parameter names on y-axis
+  yaxis_text(hjust = 1)
+```
+
+Several $\hat{R}$ values are above 1.1 (indicating problems) and none are below the 1.05 cutoff, suggesting poor mixing of chains.
+
+
+```{r}
+neff_ratio(english_iter100_m51) %>% mcmc_neff(size = 2) + yaxis_text(hjust = 1)
+```
+
+Sampling is not very efficient ($N_{eff}/N > 0.5$) for any coefficient.
+
+<!-- Diatones model: -->
+
+<!-- ```{r} -->
+
+<!-- diatones_m51 <-brm(data = diatones, -->
+
+<!--                    stress_shifted | trials(1) ~ syll2_coda + syll2_td + frequency + syll1_coda, -->
+
+<!--                    family = binomial, -->
+
+<!--                    prior = c(prior(normal(0,5), class=Intercept), -->
+
+<!--                              prior(normal(0,5), class=b)), -->
+
+<!--                    iter=50) -->
+
+<!-- ``` -->
+
+<!-- # Other reading -->
+
+<!-- Overall Bayesian workflow: -->
+
+<!-- * @gabry2019visualization: ["Visualization in Bayesian workflow"](https://arxiv.org/abs/1709.01449) -->
+
+<!--   * Useful notes from [Monica Alexander](https://www.monicaalexander.com/posts/2020-28-02-bayes_viz/). -->
+
+<!-- * @gelman2020bayesian: ["Bayesian workflow"](https://arxiv.org/abs/2011.01808) -->
+
+<!-- * @schad2021toward: ["Toward a principled Bayesian workflow in cognitive science"](https://arxiv.org/abs/1904.12765) -->

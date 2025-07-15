@@ -1,0 +1,71 @@
+# Preface {.unnumbered}
+
+This e-book is a study guide on quantitative methods for linguistic data, beyond the (2025) standard of frequentist linear and logistic (mixed-effects) regression modeling. Each chapter assumes that you have done readings indicated at the beginning of the chapter, each of which corresponds roughly to a week of a semester-long course (see "Context").
+
+## Contributors
+
+The authors are:
+
+-   Chapters 1-9: [Sonderegger](https://people.linguistics.mcgill.ca/~morgan/)
+-   Chapters 10-11: [Sóskuthy](https://soskuthy.github.io/)
+-   Chapter 12: Sóskuthy & Sonderegger
+-   Chapter 13: [Lipari](https://massimolipari.github.io/)
+-   Chapter 14: [Doucette](https://www.amandadoucette.com/)
+
+We use datasets from (incomplete list):
+
+-   [Joey Stanley](https://joeystanley.com/): in @sec-dd-1
+-   [Jeanne Brown](https://jeanne-brown.github.io/): in @sec-dd-1
+-   [Gaurav Kamath](https://grvkamath.github.io/): in @sec-gams-beyond
+-   [Michele Gubian](https://www.en.phonetik.uni-muenchen.de/people/staff/gubian_michele/index.html): in @sec-fpca
+-   [Rasmus Puggaard-Rode](https://rpuggaardrode.github.io/): in @sec-fpca <!--* [James Kirby](https://www.phonetik.uni-muenchen.de/~jkirby/): in @sec-hw3
+            -->
+
+## Context
+
+The last update to these notes was on the "Published" date above.
+
+```{=html}
+<!--**These notes assume you have done readings** indicated at the beginning of the chapter, each of which corresponds roughly to a week of the course.  
+-->
+```
+Each chapter includes:
+
+1.  **Applications to linguistic data** of concepts from the reading
+2.  **Practical illustration** of topics from the reading
+3.  **Exercises** <!--: to build under be done in class, or on your own time--> <!--**Homework problems**: to be turned in for assessment.
+            -->
+
+The motivation for these notes is a lack of (1) and/or (2) and/or (3) in existing resources. To help linguists develop their quantitative toolbox, this study guide gives:
+
+-   Practical application to go with excellent existing readings on Bayesian regression models, primarily from @mcelreath2020statistical (Chapters 1-8)
+-   An applied introduction to methods which don't currently have up-to-date published tutorials (Chapters 9, 12, 13, 14)
+-   Existing tutorial materials in a modern (Quarto) format (Chapters 10-11).
+
+These materials have been used in:
+
+-   A graduate course (LING 683, *Advanced Quantative Methods*) taught in McGill Linguistics in Fall 2024. ([Course schedule](https://bit.ly/ling683-F2024), including reading list)
+-   The course "Bayesian Regression Modeling for Language Data: A Crash Course" at the 2025 LSA Institute (parts of Chapters 1-9)
+-   Tutorials by Márton Sóskuthy (Chapters 10-12)
+
+```{=html}
+<!--The notes are organized as a Quarto book.  
+-->
+```
+```{=html}
+<!--The course schedule for LING 683, with readings, is [here](https://bit.ly/ling683-F2024).
+-->
+```
+These notes were originally compiled with LING 683 in mind, but they are intended for use as a study guide for language scientists interested in expanding their quantitative toolbox. They can be seen as a follow-up to the material in @rmld-book, but should be usable by readers who have learned similar material from a different source.
+
+Here is the introduction to the course syllabus, which should give a sense of whether these materials could be helpful for you:
+
+> "This is a second course on quantitative methods for analyzing linguistic data. It follows LING 620, where we focused on regression modeling using R, up to linear and logistic mixed-effects models. Using this as a starting point, our goals are to broaden your conceptual knowledge and methodological toolkit of quantitative methods, in order to broaden the research questions you can ask and the types of data you can analyze. This term we will cover (a) Bayesian data analysis and (b) generalized additive (mixed) models, along the way introducing (c) model types beyond linear and logistic (e.g. multinomial, Poisson) and (d) possibly other current methods (e.g. functional data analysis). These methods are increasingly used to analyze linguistic data, but are relatively new to language scientists, and standard tools and best practices for practical applications are evolving. A theme of the course is practical application, and a primary goal is developing a sufficiently strong basis in (a)–(c) that you will be able to figure out the quantitative methods needed to analyze your data in the future."
+
+## License
+
+[CC-BY-SA-4.0](https://creativecommons.org/licenses/by-sa/4.0/deed.en)
+
+## Citation
+
+Sonderegger, Morgan, Sóskuthy, Márton, Lipari, Massimo, and Doucette, Amanda. (2025) *Advanced Quantitative Methods for Linguistic Data*. https://people.linguistics.mcgill.ca/\~morgan/adv-quant-methods/. 7/2025 version.

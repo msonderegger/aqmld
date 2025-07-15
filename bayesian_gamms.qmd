@@ -1,0 +1,643 @@
+# Bayesian GAMs
+
+This lab was written by Márton Sóskuthy then edited and material added by Morgan Sonderegger.
+
+There is no comprehensive reading we know of for Bayesian GA(M)Ms, but some assigned and optional readings for LING 683 were:
+
+-   [Section 10b](https://michael-franke.github.io/Bayesian-Regression/practice-sheets/10b-GAMs.html) of Michael Franke's *Bayesian Regression: Theory and Practice*
+-   T.J. Mahr's [tutorial](https://www.tjmahr.com/random-effects-penalized-splines-same-thing/), "Random effects and penalized splines are the same thing"
+-   @wood2017generalized Sec. 4.2.4, 5.8, and references therein---mathematical background[^bayesian_gamms-1]
+
+[^bayesian_gamms-1]: Also useful, and online: [these slides](https://www.maths.ed.ac.uk/~swood34/mgcv/tampere/smoothness.pdf) by Simon Wood.
+
+Topics:
+
+-   Bayesian Generalized Additive Models
+
+## Preliminaries
+
+Load libraries we'll need, all familiar from @sec-gams and @sec-gamms on GA(M)Ms.
+
+```{r, message = FALSE}
+library(tidyverse)
+library(mgcv)
+library(brms)
+library(itsadug)
+library(tidybayes)
+library(modelr)
+
+library(patchwork)
+```
+
+Import the `pm_young` subset of the `price_bin` data, used in @sec-gamms:
+
+```{r}
+pm_young <- readRDS(file = url("https://osf.io/download/xw7va/"))
+```
+
+Today we will mostly analyze today from just one participant, whose data is stored in `s43`:
+
+```{r}
+s43 <- pm_young %>% 
+  filter(speaker=="s-43") %>%
+  group_by(id) %>%
+  mutate(traj_start = measurement_no == min(measurement_no)) %>%
+  ungroup()
+```
+
+We restrict to a single speaker because Bayesian GAMs take a long time to fit.
+
+Our research question will be the same as in Sec. 3 of Week 6: **is F1 different between PRICE and MOUTH?**
+
+Empirical plot for this speaker:
+
+```{r}
+#| code-fold: true
+
+rutgers_theme <- theme_minimal() +
+  theme(panel.grid = element_blank(),
+        axis.line = element_line(size=0.8),
+        axis.ticks = element_line(size=0.8),
+        axis.text = element_text(size=14, colour="black"),
+        axis.title = element_text(size=16, face="bold"))
+
+ggplot(s43, aes(x=measurement_no, y=f1, col=vowel)) +
+  geom_line(aes(group=id), alpha=0.05) +
+  geom_smooth() +
+  xlab("% vowel duration") +
+  ylab("F1 (Hz)") +
+  scale_colour_manual(values=c("orange","purple")) +
+  scale_x_continuous(breaks=seq(20,80,30),
+                     labels=paste0(seq(20,80,30), "%")) +
+  rutgers_theme +
+  theme(axis.text.x=element_text(size=14,angle=60, hjust=1),
+        panel.grid.major.y=element_line(size=0.1, colour="grey"))
+```
+
+## Bayesian GAMs
+
+### Motivation
+
+It is worth first thinking through: why would we want to fit a *Bayesian* GAM to this kind of data? As we'll see, Bayesian GAMs take much longer to fit and require more knoweldge than regular GAMs. What are the potential benefits?
+
+::: {#exr-gamm3-1}
+Group discussion of this point. (don't peek at the commented out text!)
+:::
+
+<!-- The major practical motivations for Bayesian models are: -->
+
+<!-- 1. Greater flexibility in model specification -->
+
+<!--   * by incorporating all the machinery available in brms: wide range of model families, distributional models, multivariate models... -->
+
+<!-- 2. Greater flexibility in model interpretation -->
+
+<!--   * using the posterior distribution given by the fitted model -->
+
+<!-- 3. Priors -->
+
+<!--   * Incorporate prior knowledge, or help fit complex models -->
+
+<!-- It turns out that (2) is not a major advantage, because GAMMs as implemented in mgcv already have a Bayesian interpretation, using a Gaussian approximation to the posterior distribution.  This approximation is typically very good.  You can thus simulate from the posterior distribution of model coefficients, for which there is good mgcv functionality (see `?gam.mh`). -->
+
+<!-- We'll discuss priors below, but in brief, specifying priors also isn't a major advantage relative to non-Bayesian GAMMs: both the $k$ parameter and the automatic smoothing incorporated into GAMMs already act like priors on smooth terms, whose strength is automatically learned (the $\lambda$ parameters). Priors for spline terms in Bayesian GAMMs are unintutive. -->
+
+<!-- That leaves (1)---which is a major advantage, on the face of it.  For example: -->
+
+<!-- * Instead of choosing an AR1 term $\rho$ via a hacky procedure that requires fitting the same model twice, $\rho$ can be *learned* as part of the model (using brms' `ar()` terms), and we are not restricted to AR1 terms (correlations between the second-to-last, etc. observations are also possible) -->
+
+<!-- * Full random effect structure, including correlations between terms, is possible, instead of being restricted to uncorrelated random intercepts (`s(speaker, bs = 're')`) and slopes (`s(x, speaker, bs = 're'))`). -->
+
+<!-- * It's easy to incorporate smooth terms into any brms model family, including ones not available using the mgcv `bam()` function (e.g. negative binomial models), and which are thus very slow to fit (using `gam()`). -->
+
+<!-- The downside is complexity: -->
+
+<!-- * Bayesian GAMs fitted using MCMC (as in brms) take a much longer time to fit, especially compared to `bam()`. -->
+
+<!-- * Bayesian GAMs require knowledge of *both* Bayesian models and GAMs -->
+
+<!-- Whether the pros outweigh the cons will depend on your data and research questions. -->
+
+### Smooth terms in brms
+
+A nice aspect of brms is that its model specification syntax is familiar from other functions: basic regression model syntax is the same as `lm()`, random effects are specified similarly to `g/lmer()`, and smooth terms are specified similarly to `gam()` or `bam()`.
+
+For example, consider a single vowel (PRICE) from speaker S43:
+
+```{r}
+### subset to just the PRICE data (discarding vowel = MOUTH):
+s43_price <- s43 %>% filter(vowel=="price")
+```
+
+To fit a frequentist GAM for this data (not accounting for grouping by vowel token, for now):
+
+```{r}
+## frequentist gam
+s43_price_gam <- bam(f1 ~ s(measurement_no, bs="cr", k=11),
+                     data=s43_price)
+```
+
+Fit the equivalent Bayesian GAM (this will take longer):
+
+```{r}
+s43_price_m1 <- brm(f1 ~ s(measurement_no, bs="cr", k=11),
+                    control=list(adapt_delta=0.99),
+                    iter = 2500, 
+                     data=s43_price, chains = 4, cores = 4, file = 'models/s43_price_m1.brm')
+```
+
+(I had to play with the `iter` and `adapt_delta`: if you use the default `brm()` settings, you'll get divergent transitions.)
+
+The Bayesian GAM takes longer to fit: a minute or two, versus instantaneous.
+
+Fitted F1 time trajectory for the two models, `bam()` (left) and `brm()` (right):
+
+```{r}
+#| layout-ncol: 2
+#| code-fold: true
+plot_smooth(s43_price_gam, view="measurement_no")
+conditional_effects(s43_price_m1) %>%
+  plot()
+```
+
+These look very similar.
+
+The elegance of brms' syntax (we basically just had to change `bam()` to `brm()`) hides larger differences between the two models under the hood.
+
+Compare their model summaries:
+
+GAM:
+
+```{r}
+summary(s43_price_gam)
+```
+
+Bayesian GAM:
+
+```{r}
+summary(s43_price_m1)
+```
+
+We know how to read a `bam()` model summary, but what should we do with this new one from `brm()`?\
+`brm()` shows different quantities, corresponding to a different way of representing smooths---it exploits the very cool equivalence between smooths and random effects, which allows a GAM to be fitted using machinery for fitting a mixed-effects model. This is well described in Mahr's [tutorial](https://www.tjmahr.com/random-effects-penalized-splines-same-thing/), and explained more succinctly in Franke's [chapter](https://michael-franke.github.io/Bayesian-Regression/practice-sheets/10b-GAMs.html).
+
+The model summary in `brm()` does not show estimated degrees of freedom like `bam()`, but a "standard deviation" parameter instead. Each smooth corresponds to one such parameter (in the model above, `sds(smeasurement_no_1)`), which is shown in the "Smoothing Spline Hyperparameters" block.
+
+To understand this parameter, which we'll call $\sigma$, it's important to know that `bam()` and `brm()` represent smooths differently. In `bam()`, the "smooth term" describes the entire curve, parametrized as a set of $k$ basis functions. In contrast, `brm()` separates the basis functions into:
+
+-   A "linear", or "fixed effect" component (= 1 basis function)
+-   A "wiggly" or "random effect" components (= $k-1$ basis functions)
+
+This is why there are two terms in the `brm()` output for `measurement_no`, compared to one in the `bam()` output. (We return to the linear component below.)
+
+The higher the magnitude of the wiggly coefficients, the more wiggly the overall smooth. Since the standard deviation of the wiggly coefficients ($\sigma$) is basically an overall summary of their magnitude, $\sigma$ tells us roughly the same information as the EDF parameter in `bam()`.
+
+If there is strong evidence that $\sigma$ is different from 0, we can conclude that we are looking at a non-linear effect. Evaluating this is like evaluating whether a random-effect term is non-zero (covered in TODO): an approximate method is to examine the posterior of $\sigma$ to see if the 95% CredI is away from 0. Let's plot the posterior distribution of $\sigma$:
+
+```{r, message = FALSE}
+mcmc_plot(s43_price_m1, variable="^sds", regex=TRUE, type="dens") + xlim(0,10)
+```
+
+The bulk of the distribution is well above 0, suggesting that there is non-linearity here.
+
+A more rigorous method would be a model comparison with a model containing a linear effect of `measurement_no`, using using PSIS-LOO or a Bayes Factor. The results should (intuitively) line up with the hypothesis test shown under "Approximate significance of smooth terms" in the `s43_price_gam` summary.
+
+::: {#exr-gamm3-2}
+Do this model comparison, using PSIS-LOO or a Bayes Factor.
+:::
+
+Returning to the "fixed" or "linear" part of the smooth---`smeasurement_no_1` in the model summary. This term is hard to interpret on its own. Conceptually, it should be the linear approximation to the curve, but in practice, this is only a rough equivalence because its estimate is tied up with the estimate of the "wiggly" part of the smooth (is my understanding). In model `s43_price_m1`, the linear term has a 95% CredI centered near 0, which makes sense given the empirical plot---a linear approximation would be (roughly) a flat line.
+
+Seeing strong evidence that the coefficient for the linear part of a smooth is different from 0 would at least suggest that the relationship is not a flat line, but checking that rigorously would require a better method (e.g. comparison with an `F1 ~ 1` model).
+
+The upshot is that, like in GAMs, the actual parameters shown in the model summary corresponding to smooth terms are hard to interpret. It's just a matter of whether there are two terms (`brm()`) or one (`bam()`) per smooth.
+
+#### Priors for smooth terms
+
+We're supposed to think about priors when fitting Bayesian models. But because the model terms corresponding to smooths are unintuitive, it's hard to define priors for them. For example, for `smeasurement_no_1` (a.k.a. $\sigma$), which parametrizes "the wiggliness of the curve", we probably want a prior like we've used for other "standard deviation parameters" (e.g. random-effect SDs) in Bayesian models (half-$t$, half-Cauchy, or exponential), but what should the scale of this prior be?
+
+A solution suggested [here](https://discourse.mc-stan.org/t/better-priors-non-flat-for-gams-brms/23012/4) by GAMM guru [Gavin Simpson](https://fromthebottomoftheheap.net/about/) is:
+
+> But you can pop a gaussian or t prior on the swt_1 term, for example, and another separate prior on the sds term, and then simulate from the prior distribution of the model (with prior_only = TRUE) and plot the prior draws using conditional_smooths() to see samples of smooths drawn from your prior. You should be looking at the amount of wigglines of the prior smooths to see if that about on average matches plausible range of wiggliness for the non-linear relationships you envisage based on your prior knowledge. You can also look at the values on the y axis to see if the implied effect sizes are reasonable given your prior expectations or not. Then you can adjust the priors you use until you effect sizes roughly in line with expectations and the same for the wigglinesses of the smooths implied by the prior.
+
+That is: use prior predictive simulation![^bayesian_gamms-2]
+
+[^bayesian_gamms-2]: I'd add to this advice: examine the predicted trajectories, if that is more intuitive. However, `conditional_smooths()` is clever about things like removing the effect of autocorrelation terms, so it may be a good idea to stick with it unless you're sure your predicted trajectories are correct.
+
+For example, in our case: the priors of the fitted model are:
+
+```{r}
+s43_price_m1_priors <- prior_summary(s43_price_m1)
+s43_price_m1_priors
+```
+
+That is:
+
+-   The intercept (row 1) and linear component (row 2: `smeasurement_no_1`) have flat priors, as is the default for fixed effects in brms.
+-   The smooth component (coef = `s(measurement_no, bs = "cr", k = 11)`) has a Student-$t$ distribution with scale estimated from the SD of the data (here, `measurement_no`), which is the default for standard deviation terms in brms.
+
+To do prior predictive simulation, we can't have any flat priors, so we'll change them to be reasonable based on domain knowledge. We'll also change the prior for the smooth component to be even weaker. The logic is: since we don't really understand what these parameters mean, we'll first use very weak priors, then "rein them in" until our prior predictive simulation gives reasonable results.
+
+As a first try:
+
+-   Reasonable values for the intercept are about 0-2000 Hz
+-   A large linear effect would be 10 (measurement_no ranges from 0-100, so that corresponds to a 1000 hz change)
+-   Keep the smooth component's prior:
+
+```{r}
+prior1 <- prior(normal(1000, 500), class = "Intercept") + prior(normal(0,10), class = b) + prior(student_t(3, 0, 63.8), class = sds)
+```
+
+Prior predictive simulation with this prior:
+
+```{r, message = FALSE}
+s43_price_brm_nopost <- brm(s43_price_m1$formula,
+                            data=s43_price_m1$data,
+                            prior=prior1,
+                            file = 'models/s43_price_brm_nopost',
+                            sample_prior="only")
+
+### Examine just the smooth
+conditional_smooths(s43_price_brm_nopost, spaghetti=T, ndraws=20)
+
+
+### Examine the predicted F1 ~ measuerment_no curves
+s43 %>%
+    data_grid(measurement_no = seq_range(measurement_no, n = 100)) %>%
+    add_epred_draws(s43_price_brm_nopost, ndraws = 100) %>%
+    ggplot(aes(x = measurement_no, y = F1)) +
+    geom_line(aes(y = .epred, group = .draw), alpha = .1) 
+```
+
+Note the scale of the $y$-axis---way too large.
+
+Let's try a more restrictive prior on the smooth term:
+
+```{r}
+prior2 <- prior(normal(1000, 500), class = "Intercept") + prior(normal(0,10), class = b) + prior(student_t(3, 0, 20), class = sds)
+```
+
+```{r}
+s43_price_brm_nopost_2 <- brm(s43_price_m1$formula,
+                            data=s43_price_m1$data,
+                            prior=prior2,
+                            file = 'models/s43_price_brm_nopost_2',
+                            sample_prior="only")
+conditional_smooths(s43_price_brm_nopost_2, spaghetti=T, ndraws=20)
+
+
+s43 %>%
+    data_grid(measurement_no = seq_range(measurement_no, n = 100)) %>%
+    add_epred_draws(s43_price_brm_nopost_2, ndraws = 20) %>%
+    ggplot(aes(x = measurement_no, y = F1)) +
+    geom_line(aes(y = .epred, group = .draw), alpha = .1) 
+```
+
+Notice the difference in scale along the $y$-axis. There is a comparable amount of wiggliness here relative to what we know F1 curves in the real world look like---though perhaps we'd like to put an even stronger prior on wiggliness.
+
+<!-- There is still a lot of wiggliness here relative to what we know F1 curves in the real world look like.  Also, F1 shouldn't be able to go below 0.  I'll use an exponential prior now because I know roughly what its param Let's try: -->
+
+<!-- ```{r} -->
+
+<!-- prior3 <- prior(normal(1000, 250), class = "Intercept") + prior(normal(0,10), class = b) + prior(exponential(0.1), class = sds) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- s43_price_brm_nopost_3 <- brm(s43_price_m1$formula, -->
+
+<!--                             data=s43_price_m1$data, -->
+
+<!--                             prior=prior3, -->
+
+<!--                             file = 'models/s43_price_brm_nopost_3', -->
+
+<!--                             sample_prior="only") -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- conditional_smooths(s43_price_brm_nopost_3, spaghetti=T, ndraws=20) -->
+
+<!-- s43 %>% -->
+
+<!--     data_grid(measurement_no = seq_range(measurement_no, n = 100)) %>% -->
+
+<!--     add_epred_draws(s43_price_brm_nopost_3, ndraws = 20) %>% -->
+
+<!--     ggplot(aes(x = measurement_no, y = F1)) + -->
+
+<!--     geom_line(aes(y = .epred, group = .draw), alpha = .1)  -->
+
+<!-- ``` -->
+
+<!-- These look closer to what's possible in reality for F1 trajectories.  -->
+
+This still isn't a great prior, but hopefully we've shown what the process of using posterior predictive simulation to refine the prior would look like---even when the actual model parameters for the smooths are difficult to interpret.
+
+### Autoregression terms
+
+What if we wanted to control for correlations within trajectories? It's easy -- and, actually, brms is much more flexible in how we do it. We can finally test the question of whether we need an AR1 or an AR2 model:
+
+```{r}
+s43_price_brm_ar1 <- brm(f1 ~ s(measurement_no, bs="cr", k=11) + ar(p=1, gr=id),
+                     data=s43_price, control=list(adapt_delta=0.99),
+                     file = 'models/s43_price_brm_ar1',
+                     cores=4, chains = 4)
+s43_price_brm_ar2 <- brm(f1 ~ s(measurement_no, bs="cr", k=11) + ar(p=2, gr=id),
+                     data=s43_price, control=list(adapt_delta=0.99),
+                     file = 'models/s43_price_brm_ar2',
+                     cores=4, chains = 4)
+```
+
+Model summaries:
+
+```{r}
+summary(s43_price_brm_ar1)
+summary(s43_price_brm_ar2)
+```
+
+```{r}
+conditional_effects(s43_price_m1) %>%
+  plot()
+conditional_effects(s43_price_brm_ar1) %>%
+  plot()
+conditional_effects(s43_price_brm_ar2) %>%
+  plot()
+```
+
+Note that these models handle autocorrelation much more rigorously than those fitted with `bam()`, since the rho component(s), i.e., `ar[1]` at lag 1 and `ar[2]` at lag 2, are estimated directly from the data at the same time as the model.
+
+We can also use model comparison to actually test "is it important to account for autocorrelation?" and "if so, is an AR1 correlation structure sufficient?"
+
+<!-- ```{r} -->
+
+<!-- s43_price_m1 <- add_criterion(s43_price_m1, criterion = 'loo') -->
+
+<!-- s43_price_brm_ar1 <- add_criterion(s43_price_brm_ar1, criterion = 'loo') -->
+
+<!-- s43_price_brm_ar2 <- add_criterion(s43_price_brm_ar2, criterion = 'loo') -->
+
+<!-- loo_compare(s43_price_m1, s43_price_brm_ar1, s43_price_brm_ar2) -->
+
+<!-- ``` -->
+
+<!-- The answers are "yes" and "yes". -->
+
+::: {#exr-gamm3-3}
+a.  Examine the model prediction plots just above. What effect has incorporating AR1 structure had on model predictions? AR2 structure?
+
+b.  Use model comparison (via PSIS-LOO), with the three last models fitted above, to test: "is it important to account for autocorrelation?" and "if so, is an AR1 correlation structure sufficient?"
+
+c.  Determine a `rho` value for our `bam()` model, `s43_price_gam`. How does it compare to the 95% CredI of this parameter in `s43_price_brm_ar1`?
+:::
+
+## A Bayesian model with a difference term
+
+Let us now add a difference term that captures the difference between PRICE and MOUTH.
+
+```{r}
+s43$vowel_o <- as.ordered(s43$vowel)
+contrasts(s43$vowel_o) <- "contr.treatment"
+
+### takes a few minutes to fit on my laptop - Morgan
+s43_price_brm_diff <- brm(f1 ~ vowel_o +
+                            s(measurement_no, bs="cr", k=11) + 
+                            s(measurement_no, bs="cr", k=11, by=vowel_o) + 
+                            ar(p=1, gr=id),
+                     data=s43, control=list(adapt_delta=0.99),
+                     file = 'models/s43_price_brm_diff',
+                     cores=4, chains = 4)
+summary(s43_price_brm_diff)
+
+```
+
+```{r}
+#| layout-ncol: 2
+conditional_effects(s43_price_brm_diff) %>%
+  plot()
+```
+
+The output of the model looks reassuring, but it's hard to interpret the summary. Is there a lot of evidence for a difference between the two curves? Let us plot the relevant parts of the posterior distribution.
+
+```{r}
+mcmc_plot(s43_price_brm_diff, variable="^sds", regex=TRUE, type="dens") + xlim(0,7)
+mcmc_plot(s43_price_brm_diff, variable="bs_smeasurement", regex=TRUE, type="dens")
+```
+
+It would look like there's definitely some evidence for a difference, though the smooth SD term in particular doesn't look that convincingly different from 0.
+
+To assess whether there is a PRICE/MOUTH difference, we could do a model comparison:
+
+```{r}
+### model without difference in curve by vowel, beyond overall height
+s43_price_brm_diff_2 <- brm(f1 ~ vowel_o +
+                            s(measurement_no, bs="cr", k=11) + 
+                            ar(p=1, gr=id),
+                     data=s43, control=list(adapt_delta=0.99),
+                     file = 'models/s43_price_brm_diff_2',
+                     cores=4, chains = 4)
+
+### model without any difference by vowel
+s43_price_brm_diff_3 <- brm(f1 ~ 
+                            s(measurement_no, bs="cr", k=11) + 
+                            ar(p=1, gr=id),
+                     data=s43, control=list(adapt_delta=0.99),
+                     file = 'models/s43_price_brm_diff_3',
+                     cores=4, chains = 4)
+
+```
+
+```{r}
+s43_price_brm_diff <- add_criterion(s43_price_brm_diff, criterion = 'loo')
+s43_price_brm_diff_2 <- add_criterion(s43_price_brm_diff_2, criterion = 'loo')
+s43_price_brm_diff_3 <- add_criterion(s43_price_brm_diff_3, criterion = 'loo')
+
+loo_compare(s43_price_brm_diff, s43_price_brm_diff_2, s43_price_brm_diff_3)
+```
+
+::: {#exr-gamm3-4}
+Interpret this model comparison to answer the research question (for speaker 43).
+:::
+
+## Model interpretation
+
+An advantage of a Bayesian GAM is flexibility of model interpretation. We can now compute any quantities we want from the posterior, rather than being restricted to difference smooths, etc.
+
+As a simple example, we can make spaghetti plots showing uncertainty in trajectory *shape*---which goes beyond what we're able to show just by looking at 95% CIs/CredIs. This can be done just using the `spaghetti` flag of `conditional_effects()`:
+
+```{r}
+#| layout-ncol: 2
+
+conditional_effects(s43_price_brm_diff, spaghetti = TRUE, ndraws = 25)
+```
+
+As a more involved example: we might want to examine summary statistics of the modeled trajectories, like **maximum F1**, to examine whether this differs between `vowel` = *MOUTH* and *PRICE*.
+
+We can do this by:
+
+-   Making the calculations for a spaghetti plot like the one above, but for 500 spaghetti strands, using `conditional_effects()`
+-   Extract the 500 trajectories per vowel
+-   For each trajectory, find the maximum F1, giving 500 values of `F1_max_mouth` and `F1_max_price`, as well as `F1_max_diff` (the difference between them)---which can be thought of as samples from the posteriors of these three quantities.
+
+::: {#exr-gamm3-5}
+a.  Implement this, and use the results to calculate the 95% CredI of `F1_max_diff`.
+
+b.  Use a similar procedure to calculate `F1_location_diff` : the posterior of the difference in location of the F1 max (= difference in `measurement_no`) between MOUTH and PRICE.
+:::
+
+<!-- ```{r} -->
+
+<!-- measurement_grid <- s43 %>% -->
+
+<!--     data_grid( -->
+
+<!--         measurement_no = seq_range(measurement_no, n = 100), -->
+
+<!--         vowel_o -->
+
+<!--     ) %>% mutate(id = "price_26892") -->
+
+<!--  posterior_trajectories <- s43_price_brm_diff %>% add_epred_draws( -->
+
+<!--     newdata = measurement_grid, -->
+
+<!--     ndraws = 2000, -->
+
+<!--     re_formula = NULL -->
+
+<!-- ) -->
+
+<!--  max_f1 <- posterior_trajectories %>% -->
+
+<!--   group_by(.draw, vowel_o) %>% -->
+
+<!--   summarize(F1_max = max(.epred), .groups = "drop") %>% -->
+
+<!--   pivot_wider(names_from = vowel_o, values_from = F1_max, names_prefix = "F1_max_") %>% -->
+
+<!--    mutate(F1_max_diff = F1_max_mouth - F1_max_price) -->
+
+<!-- ``` -->
+
+### Real data
+
+To fit a model to a real dataset, with multiple speakers, we have to reckon with the fact (I think) that that you can't include "random intercepts" or "factor smooths" in a brms GAMM. From [here](https://discourse.mc-stan.org/t/does-brms-have-issues-with-perfect-linear-dependencies-between-smooth-covariates/22747):
+
+> Unfortunately, you cannot use splines as “random” or “varying” effects, because the penalized splines from mgcv which brms relies on are already implemented as a varying effect.\
+> So if you want a smooth term that is at the same time a “random” effect, you need to work directly with non-penalized splines. That’s IMHO usually not a big deal, since you rarely want to allow the per-individual spline to be very complex (you can’t learn them reliably anyway), so a low-degree-of-freedom spline should work just well. So something like:
+>
+> y \~ Treatment + s(t, by = Treatment) + (1 + bs(t, df = 2)\|individual) Could be sensible. (this requires the splines package. You may also want to use ns but I would expect the results to be quite comparable)
+
+The model below attempts to use this tip to fit a Bayesian version of our GAMM for the full `pm_young` dataset (all speakers), from Week 7:
+
+```{r, eval = FALSE}
+price_bin_gam_rsmooth <- bam(f2 ~ age_o +
+                       s(measurement_no, bs="cr", k=11) +
+                       s(measurement_no, bs="cr", k=11, by=age_o) +
+                       s(measurement_no, speaker_f, bs="fs", m=1, k=11),
+                     data=price_bin,
+                     AR.start=traj_start, rho=rho_est)
+
+```
+
+It takes a very long time to fit the following model: (**Don't run this code! It takes 1-2 hours on my laptop**)
+
+```{r, eval = FALSE}
+pm_young$vowel_o <- as.ordered(pm_young$vowel)
+contrasts(pm_young$vowel_o) <- "contr.treatment"
+
+pm_young$speaker_f <-factor(pm_young$speaker)
+
+prior2 <- prior(normal(1000, 500), class = "Intercept") + prior(normal(0,10), class = b) + prior(student_t(3, 0, 20), class = sds)
+
+
+
+price_all_m2 <- brm(f1 ~ vowel_o +
+                      s(measurement_no, bs="cr", k=11) + 
+                      s(measurement_no, bs="cr", k=11, by=vowel_o) +
+                      + (1 + bs(measurement_no, df = 2)*vowel_o | speaker_f )  +
+                      ar(p=1, gr=id),
+                    prior = prior2,
+                    data=pm_young, 
+                    file = 'models/price_all_m2',
+                    cores=4, chains = 4)
+```
+
+<!-- ```{r} -->
+
+<!-- ### It looks like the GAM actually underestimates the degree of autocorrelation -->
+
+<!-- rho_est <- start_value_rho(s43_price_gam) -->
+
+<!-- ``` -->
+
+<!-- New library for today, which we'll use to expand our repertoire of plotting tools beyond itsadug (motivated at the end of last week): gratia. -->
+
+<!-- * "Graceful ‘ggplot’-based graphics and utility functions for working with generalized additive models (GAMs) fitted using the ‘mgcv’ package." -->
+
+<!-- ---- -->
+
+<!-- Import the `price_bin` data from last time, as well as two new versions of this data that we'll need below. -->
+
+<!-- ```{r} -->
+
+<!-- price_bin <- readRDS(file = url("https://osf.io/download/vs6jk/")) -->
+
+<!-- pm_young <- readRDS(file = url("https://osf.io/download/xw7va/")) -->
+
+<!-- price_cont <- readRDS(file = url("https://osf.io/download/t3udn/")) -->
+
+<!-- ### you can also download these files from Piazza, and -->
+
+<!-- ### load them in from the current directory, e.g. -->
+
+<!-- ## price_bin <- readRDS("price_bin.rds") -->
+
+<!-- ``` -->
+
+<!-- Re-do code from last week: -->
+
+<!-- * Code new factor needed for a model with a difference smooth for `age` (same as last week) -->
+
+<!-- * Fit a first model to the New Zealand diphthong data (`price_bin`) to determine `rho_est` for fitting an AR1 model next. -->
+
+<!-- ```{r} -->
+
+<!-- ### needed to fit a model with a difference smooth -->
+
+<!-- price_bin$age_o <- as.ordered(price_bin$age) -->
+
+<!-- contrasts(price_bin$age_o) <- "contr.treatment" -->
+
+<!-- ### needed to fit the AR1 model -->
+
+<!-- price_bin <- price_bin %>% -->
+
+<!--   group_by(id) %>% -->
+
+<!--   mutate(traj_start=measurement_no == min(measurement_no)) %>% -->
+
+<!--   ungroup() -->
+
+<!-- ### model with difference smooth -->
+
+<!-- price_bin_gam <- -->
+
+<!--   bam( -->
+
+<!--     f2 ~ age_o + -->
+
+<!--       s(measurement_no, bs = "cr", k = 11) + -->
+
+<!--       s(measurement_no, bs = "cr", k = 11, by = age_o), -->
+
+<!--     data = price_bin -->
+
+<!--   ) -->
+
+<!-- rho_est <- start_value_rho(price_bin_gam) -->
+
+<!-- ``` -->

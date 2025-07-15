@@ -1,0 +1,954 @@
+# Bayesian basics 2 {#sec-bb2}
+
+---
+nocite: |
+  @bdacs
+---
+
+These lecture notes cover topics from:
+
+-   @mcelreath2020statistical Chap. 3 (except 3.1), 4.1.4-4.3.2
+-   @kurz2021statistical 3.4, 4.3.6
+-   A Poisson regression introduction [e.g. the first part of @winter2021poisson].
+-   The tidybayes package's [vignette](https://mjskay.github.io/tidybayes/articles/tidy-brms.html#point-summaries-and-intervals-1): on "Point summaries and intervals".
+
+Topics:
+
+-   Posterior distribution: Summarizing
+-   Posterior predictive distribution
+-   More model types
+    -   Single parameter: binomial, **poisson**
+    -   Two parameters: normal, **negative binomial**
+
+<!-- ::: {.callout-note} -->
+
+<!-- Code for making plots on this page is hidden by default to make reading -->
+
+<!-- this document easier. Just click "Code" to see the code. -->
+
+<!-- ::: -->
+
+## Preliminaries {#sec-bb2-prelim}
+
+Load libraries we will need:
+
+```{r, message=FALSE}
+library(arm) # for the invlogit function
+library(tidyverse)
+library(brms)
+
+library(broom) # for tidy model summaries
+library(tidybayes)
+library(languageR) # for the english dataset
+library(patchwork) # for plotting
+```
+
+::: callout-tip
+## Practical note
+
+If you have loaded `rethinking`, you need to detach it before using brms. See @kurz2021statistical Sec. 4.3.1.
+:::
+
+Load the `diatones` dataset from [*Regression Modeling for Linguistic Data*](https://osf.io/pnumg/), like last week:
+
+```{r}
+diatones <- read.csv("https://osf.io/tqjm8/download")
+```
+
+Also load the `dyads` dataset discussed in @winter2021poisson:
+
+```{r}
+dyads <- read.csv("https://osf.io/6j8kc/download")
+```
+
+Their description:
+
+> "...\[dataset of\] co-speech gestures by Catalan and Korean speakers. The data comes from a dyadic task performed by Brown et al. (under review) in which participants first watched a cartoon and subsequently told a partner about what they had seen. The research question was whether the social context modulates people’s politeness strategies, including nonverbal politeness strategies, such as changing the frequency of one’s co-speech gestures. The key experimental manipulation was whether the partner was a friend or a confederate, who was an elderly professor."
+
+> "There are two data points per participant, one from the friend condition, and one from the professor condition. The `ID` column lists participant identifiers for all 27 participants (14 Catalan speakers and 13 Korean speakers). The `gestures` column contains the primary response variable that we are trying to model, the number of gestures observed on each trial. The `context` predictor specifies the social context that was experimentally manipulated."
+
+## tidybayes and bayesplot
+
+Above we loaded tidybayes [@tidybayes], a package for integrating Bayesian modeling methods into a tidyverse + ggplot workflow, which works well with [brms](https://mjskay.github.io/tidybayes/articles/tidy-brms.html). We will often use this package for working with the posterior distributions of fitted brms models (meaning, samples from the posterior), in addition to the posterior package [@posterior], which is "intended to provide useful tools for both users and developers of packages for fitting Bayesian models or working with output from Bayesian models" (`?posterior`).[^week3-1]
+
+[^week3-1]: Like all "tidy" packages to do $x$: you don't *have* to use this package to do $x$, it just makes things much easier if you are working with tidyverse packages already.
+
+We'll also start using the useful [bayesplot](https://mc-stan.org/bayesplot/) package [@bayesplot; @gabry2019visualization], an "extensive library of plotting functions for use after fitting Bayesian models (typically with MCMC)", such as posterior predictive checks, introduced below.
+
+## Summarizing posterior distributions
+
+Once you've fitted a Bayesian model, you're able to sample from the posterior over model parameter(s). Now we want to summarize and interpret the posterior using these samples:
+
+-   *Interval* estimates: "most likely" values of $p_{\text{shift}}$
+-   *Point* estimates: central tendency (mean/median/mode)
+
+We will use a couple example posteriors, for our example from last week:
+
+```{=tex}
+\begin{align}
+p_{\text{shift}} & \sim \text{Uniform}(0,1) \\
+k & \sim \text{Binomial}(n, p_{\text{shift}})
+\end{align}
+```
+(I have written the probability of stress shift as $p_{\text{shift}}$ to avoid confusion with "probability" in general.)
+
+### Example posterior 1
+
+To see why different interval/point methods matter, it is useful to use a highly skewed posterior. McElreath's example in 3.2 is equivalent to taking $n=3$ and observing $k=3$, e.g. 3 words with `stress_shifted`=1 for a binomial distribution. The posterior over $p_{\text{shift}}$ is then a $\text{Beta}(1,4)$ distribution, which looks like this:
+
+```{r}
+#| code-fold: true
+
+#set up a vector of p=0...1
+p_vec <- seq(0.0001,0.9999, by=0.01)
+
+data.frame(p=p_vec, post=dbeta(p_vec, 4, 1)) %>% 
+  ggplot(aes(x=p_vec, y=post)) + 
+  geom_line() + 
+  xlab("p_shift") +
+  ylab("Posterior probability (PDF)")
+```
+
+It would be possible to just calculate a median, mode, etc. for this curve, but in practice we almost always work with samples from the posterior (usually from a fitted model):
+
+```{r}
+## take 1000 samples
+samples_1 <- rbeta(n=10000, 4, 1)
+```
+
+It is useful to start doing so now.
+
+### Example posterior 2
+
+The posterior for a model fitted as Exercise 10 last week, after seeing the first 20 observations from `diatones` (i.e., $k=20$):
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+## week 3, model 1
+diatones_m31<-
+  brm(data = diatones[1:20,],
+      family = binomial(link = "identity"),
+      stress_shifted | trials(1) ~ 0 + Intercept,
+      prior(beta(1, 1), class = b, lb = 0, ub = 1),
+      file='models/diatones_m31.brm'
+  )
+diatones_m31
+```
+
+(I will suppress output/messages/warnings from brms fits from now on, unless they're relevant for us.)
+
+::: callout-tip
+## Practical note
+
+The `file` argument here saves the fitted model to a file. If the file exists already, `brm()` just loads the model instead of refitting. This makes it easier for me to write/compile this document, and it's good practice to use the `file` argument once you are fitting "real" models (to make sure you don't lose them once fitted). If you want to refit the model, you then need to delete the corresponding `.brm` file first. You (reader) can either remove this argument or create a `models/` directory.
+:::
+
+Extract posterior samples using `spread_draws()` from tidybayes:
+
+```{r}
+diatones_m31_draws <- diatones_m31 %>% spread_draws(b_Intercept)
+```
+
+`spread_draws(a)` puts the samples ("draws" from the posterior) for parameter(s) `a` in a tibble in tidy format for subsequent processing or plotting, with many pre-coded routines available (see [vignette](https://mjskay.github.io/tidybayes/articles/tidy-brms.html)). `diatones_m31_draws` has one row for each post-warmup draw (= 4000 rows):
+
+```{r}
+diatones_m31_draws
+```
+
+Plot the posterior from these samples, using the `stat_slab()` function from tidybayes:
+
+```{r}
+#| code-fold: true
+diatones_m31_draws %>%
+  ggplot(aes(x = b_Intercept)) + 
+  stat_slab()+ ## one way to visualize posterior; could also e.g. use a histogram
+  xlab("p_shift")+
+  ylab("Posterior probability") + 
+  xlim(0,1)
+```
+
+Save the samples of $p_{\text{shift}}$ as a separate vector for convenience:
+
+```{r}
+samples_2 <- diatones_m31_draws$b_Intercept
+```
+
+### Intervals
+
+Posterior distributions are often summarized with a *credible interval* describing where X% of probability lies. Typically X = 95%, by convention. McElreath uses 89% to remind us that there is nothing sacred about 95%, and to avoid triggering NHST thinking using $p<0.05$.[^week3-2] Credible intervals are analogous to frequentist "confidence intervals", but with a more straightforward interpretation.
+
+[^week3-2]: He also calls these *compatibility intervals*, to avoid the implications of "compatibility" or "confidence", but this is non-standard.
+
+Two common options for CredI's (as they're often abbreviated) are:
+
+-   *quantile interval* (a.k.a *percentile*): values of $p$ between 2.5% and 97.5% quantile
+-   *highest posterior density interval* (a.k.a *highest-density interval*): narrowest range of $p$ containing 95% posterior probability.
+
+<!-- It is useful to first consider 50% intervals: -->
+
+<!-- ```{r} -->
+
+<!-- qi(samples_1, .width = 0.5) -->
+
+<!-- hdi(samples_1, .width=0.5) -->
+
+<!-- qi(samples_2, .width=0.5) -->
+
+<!-- hdi(samples_2, .width=0.5) -->
+
+<!-- ``` -->
+
+Let's calculate 89% intervals for our two example posteriors:
+
+```{r}
+qi(samples_1, .width = 0.89)
+hdi(samples_1, .width=0.89)
+qi(samples_2, .width=0.89)
+hdi(samples_2, .width=0.89)
+```
+
+Note how the QI and HDI for Example 1 are different, while those for a more symmetric distribution (Example 2) are practically the same.
+
+In general, HPDs are better at conveying the shape of the distribution, including where the mode is, and are conceptually preferable to QIs. But HPDs have several drawbacks relative to QIs:
+
+-   More computationally intensive to compute.
+-   More sensitive to how many samples are drawn from the posterior.
+-   For multimodal posteriors, HPD-based CredI's can be discontinuous.
+-   Harder to convey to a reader.
+
+None of this matters for our simple examples, but going forward we will usually use PI-based intervals, as brms (and Stan) do by default. "CI" or "CredI" will mean "quantile-based credible interval", unless otherwise noted.
+
+In cases where the choice between an HPD and QI-based CredI matters, you arguably should not be describing the posterior just using a point+interval estimate anyway.
+
+### Point estimates
+
+Bayesians don't like reporting a single number to summarize the whole posterior distribution, but humans often find such a number useful. Choices:
+
+-   Posterior mode: *MAP* estimate (maximum a-posteriori)
+-   Posterior *median*
+-   Posterior *mean*
+
+The mode makes intuitive sense. The median or mean can be justified as minimizing different kinds of loss function [@mcelreath2020statistical, 3.2] when trying to guess $p$.
+
+For our examples:
+
+```{r}
+data.frame(
+  example=c(1,2),
+  MAP = c(Mode(samples_1), Mode(samples_2)),
+  median = c(median(samples_1), median(samples_2)),
+  mean = c(mean(samples_1), mean(samples_2)
+  )
+) %>% round(3)
+```
+
+Again, these different methods differ a lot for a non-symmetric distribution (Example 1) and less for a symmetric distribution (Example 2). Make sure you understand why mean $<$ median $<$ MAP for Example 1, given the shape of the distribution (plotted above).
+
+<!-- Note how the MAP, median, and mean for  -->
+
+<!-- Note how MAP computed for example 1 is not actually at $p=1$ (the real -->
+
+<!-- MAP of the posterior). This illustrates how any point estimate (of a -->
+
+<!-- sample from the posterior) is an **estimate**, which will be better for -->
+
+<!-- larger samples. -->
+
+All three point estimates are reported in practice. MAP is common, but <!-- (I think)  --> has the same disadvantages as HPD-based CredI's. brms uses the posterior mean by default.
+
+The tidybayes package will calculate these and many other quantities for you via helper functions. For example, to get the median and 95% quantile-based CIs for Example 1:
+
+```{r}
+median_qi(samples_1)
+```
+
+Here, `y`, `ymin`, `ymax` are median and 95% CI boundaries.
+
+### Visualizing distributions {#sec-bb2-visualizing}
+
+In practice it is best to visualize posteriors together with point/interval summaries showing multiple probability values (not just 0.025 and 0.975). tidybayes provides many options,[^week3-3] such as a "half-eye" plot, which shows the 66% and 95% (quantile-based) CIs by default:
+
+[^week3-3]: See [this `ggdist` vignette](https://mjskay.github.io/ggdist/articles/slabinterval.html) for other possible visualizations.
+
+```{r}
+#| code-fold: true
+diatones_m31_draws %>%
+  ggplot(aes(x = b_Intercept)) +
+  stat_halfeye()+
+  xlab("p_shift")+
+  ylab("Posterior probability") + 
+  xlim(0,1)
+```
+
+::: {#exr-bb2-1}
+Examine the output of model `diatones_m31`:
+
+```{r}
+diatones_m31
+```
+
+a.  What do `Estimate`, `l-95% CI`, and `u-95% CI` mean? (Hint: look at calculations above.)
+b.  What do you think `Est.Error` means?
+c.  *Extra*: Verify your guess by computing this number using our sample from the posterior distribution of the model's intercept (`samples_2`).
+:::
+
+::: {#exr-bb2-2}
+Make a visualization of the posterior for @exr-bb2-1 using `samples_1` (the samples from the posterior). which shows both the density and point/interval summaries.
+
+Note that to use a tidybayes function for this, you'll first need to make a dataframe with `samples_1` as one column.
+:::
+
+## Posterior predictive distribution
+
+Above we considered sampling from the posterior to summarize the posterior: what the model says about likely parameter values. This is analogous to frequentist models, where we get parameter estimates, confidence intervals, etc. Another use for the posterior is to understand what the model says about likely *data*: what McElreath calls its "implied predictions".
+
+Informally: because Bayesian models are generative, once we know how likely different parameter values are (the posterior), we can simulate new data (observations), by just running the model forward. This is called *dummy* or *fake data*.
+
+Let $\vec{y}$ be the observed data, and $\vec{\theta}$ be the parameter values. Fitting a model gives the posterior distribution:
+
+$$
+\underbrace{P(\vec{\theta} | \vec{y})}_{\text{posterior}} \propto \underbrace{\vec{P(\vec{y} | \vec{\theta})}}_{\text{likelihood}} \underbrace{\vec{P(\vec{\theta})}}_{\text{prior}}
+$$
+
+The probability distribution for *new* data, $\vec{y}_{new}$, is the *posterior predictive distribution*, $P(\vec{y}_{new} | \vec{y})$. How likely different values of new data are ($\vec{y}_{new}$) is obtained by:[^week3-4]
+
+[^week3-4]: In an equation: $$
+    \underbrace{P(\vec{y}_{new} | \vec{y})}_{\text{posterior predictive distribution}} \propto \int P(\vec{y}_{new} | \vec{\theta}) P(\vec{\theta} | \vec{y}) d\vec{\theta}
+    $$ Another description, from [Nicenboim et al. Sec. 3.5](https://vasishth.github.io/bayescogsci/book/sec-ppd.html): "After we have seen the data and obtained the posterior distributions of the parameters, we can now use the posterior distributions to generate future data from the model. In other words, given the posterior distributions of the parameters of the model, the posterior predictive distribution gives us some indication of what future data might look like."
+
+<!-- How likely different -->
+
+<!-- In words:  -->
+
+1.  For every possible value of the parameters $\vec{\theta}$:
+2.  Compute how likely $\vec{y}_{new}$ is under $\vec{\theta}$ (the likelihood).
+3.  Weight by how likely these parameter value are (the posterior).
+4.  Sum over all parameter values.
+
+We can think of the posterior distribution as a machine for calculating new (fake) datasets. Each simulated observation captures two sources of uncertainty:
+
+1.  In parameters (the posterior)
+2.  In observations, given the parameter values
+
+Both sources of uncertainty are propagated by the posterior predictive distribution. @mcelreath2020statistical, Sec. 3.3.2.2, gives a very nice visualization (Fig. 3.6).
+
+### Example
+
+For the `diatones_m31` model, where $\vec{y}$ is a sequence of 20 zeros and 1s, we can use `posterior_predict()` to simulate 4000 new draws of the data:
+
+```{r}
+pp_ex <- posterior_predict(diatones_m31) 
+head(pp_ex)
+```
+
+Each row is one draw, each column is one of the 20 data points. We can plot these simulated datasets by plotting the distribution of $k$: the number of shifted stress words (out of 20). This distribution is:
+
+```{r}
+#| code-fold: true
+
+data.frame(num_shifted=apply(posterior_predict(diatones_m31), 1, sum)) %>% 
+  ggplot(aes(x=num_shifted)) + 
+  geom_histogram(bins = 20) + 
+  geom_vline(aes(xintercept=6), lty=2) + 
+  ## dotted line: the *observed* number of shifted words.
+  xlab("k: number of shifted words out of 20")
+```
+
+The distribution of *predicted* $k$ is quite wide, because it incorporates both sources of variance:
+
+-   The 95% CI for $p_{shift}$ is \[0.14, 0.52\], corresponding to $k \in [2.8, 10.4]$ (multiply $p_{shift}$ by 20)
+-   The variability in $k$ expected from *observation-level* variance, for the MAP estimate of $p_{shift}$ (0.32), is:
+
+```{r}
+#| code-fold: true
+
+k_vec <- 0:20
+data.frame(k = k_vec) %>%
+ggplot(aes(x=k, y=dbinom(k, 20, p=0.32))) + 
+  geom_line() + 
+  ylab("Probability (PDF)")
+```
+
+------------------------------------------------------------------------
+
+More generally, the posterior predictive distribution allows us to examine *any* quantity that can be computed from the model. This strength is not apparent for our simple first model; we will return to it below. <!-- (Sec. \@ref{#ppcs}). --> <!-- for some other models. --> <!-- (for the poisson model, we'll examine the distribution of the mean and variance of $y$we will return to this once we've examined some other models. -->
+
+Working with (fake data from the) posterior predictive distribution is a powerful method for [@mcelreath2020statistical, 3.3]:
+
+-   model checking (do predictions roughly match observations?)
+-   model design (will this model do what we expect, given all its moving parts?)
+-   software validation (if we simulate from a known distribution, then fit a model, do we get back the right parameters?)
+-   forecasting / model understanding (what does this model predict for cases relevant for our RQs? For new cases?)
+
+We'll see these uses as we go along.
+
+<!-- compute the posterior of whatever quantity makes sense for evaluating the model and answering your research questions, using the *posterior predictive distribution*.  Intuitively, the PPD is the distribution of the **data** under the fitted model. -->
+
+## More model types
+
+So far we have fit one simple model: an intercept-only *binomial* model, with an identity link (the single parameter $p_{\text{shift}}$ was modeled directly).
+
+Let's learn how to fit more types of models in brms. For now we will stick to models with one fitted parameter, with "uninformative" (flat or very shallow) priors for model parameters. We'll then move to models with two parameters (below), models with actual predictors (next week), and better priors.
+
+<!-- This will also let us: -->
+
+<!-- * Practice notation for writing down probability models, using simple cases. -->
+
+<!-- * Practice `tidybayes` for working with posteriors -->
+
+<!-- * Start using Poisson distributions -->
+
+### Binomial with logit link
+
+Typically we fit *logistic regression* to data where $y=0$ or 1: a binomial model with a logit link. Consider the (frequentist) model fit using `glm()` to the `diatones` data, first 20 observations. For observation $i$:
+
+$$
+\text{logit}(P(y_i = 1)) = \alpha , \quad i=1, \ldots n
+$$
+
+$\alpha$ is the the probability that `stress_shift` = 1 in log-odds---the model's intercept. (In terms of notation we've used for our first model, $\alpha = \text{logit}(p_{shift})$.) To write this as a Bayesian model, we need a prior on $\alpha$.
+
+$\alpha$ could be any number in $[-\infty, \infty]$, so it cannot have a uniform prior. Instead we can give it an "uninformative" prior centered around 0:
+
+$$
+\alpha \sim N(0, 25)
+$$ (read: normal distribution with mean 0, SD 25.) This is effectively the same as $p \sim \text{Beta}(1,1)$ (uniform prior), in the sense that both of them are near-flat over values of $\alpha$ (i.e., log-odds of $p_{\text{shift}}$) which are at all reasonable. Here's what this prior looks like in terms of $\alpha$:
+
+```{r}
+#| code-fold: true
+
+df <- data.frame(alpha = seq(-10, 10, by=0.01) , p=dnorm(x=seq(-10, 10, by=0.01) , sd = 25))
+
+## log-odds of -5 to 5
+df %>%  ggplot(aes(x=alpha, y=p)) + 
+  geom_line() + 
+  xlab(expression(alpha)) + 
+  ylab("Probability (density)") + 
+  xlim(-5,5) + 
+  ylim(0, max(df$p)*1.05) + 
+  theme(axis.title.x = element_text(size = 15))  
+```
+
+And in terms of $p_{\text{shift}}$:
+
+```{r}
+#| code-fold: true
+
+## corresponds to p_shift = 0.007 to 0.9933 after inverse-logit transform
+## plogis(5)
+## plogis(-5)
+df %>%  ggplot(aes(x=invlogit(alpha), y=p/sum(p))) +
+  geom_line() +
+  labs(x = expression(p[shift]~"(=inverse logit("*alpha*"))"), y = "Probability (density)") +
+  xlim(0.007, 0.9933) + 
+  ylim(0, max(df$p/sum(df$p))*1.05)
+```
+
+The probability model, written in terms of single observations of $y$ (`stress_shifted`):
+
+```{=tex}
+\begin{align}
+\text{logit}(p_{\text{shift}}) & \sim N(0, 25) \\
+y & \sim \text{Binomial}(p_{\text{shift}}, 1)
+\end{align}
+```
+The second row is also called a *Bernoulli distribution*: a binomial with $n=1$.
+
+To fit this model in brms using default settings:[^week3-5]
+
+[^week3-5]: Technically: `family = binomial` means "GLM for binomial distribution with logit link", often just called "logistic regression".
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+diatones_m32 <-
+  brm(data = diatones[1:20,],
+      family = binomial,
+      stress_shifted | trials(1) ~ 1,
+      prior(normal(0, 10), class = Intercept),
+      file='models/diatones_m32.brm'
+  )
+```
+
+Model results:
+
+```{r}
+diatones_m32
+```
+
+The estimate for $\text{logit}(p_{\text{shift}})$ and its `Est. Error` are similar to a `glm()` (frequentist) model, shown in @sec-bb2-extra.
+
+We will typically fit logistic regression models using the `bernoulli` family. This simplifies the model formula slightly, and the model fits slightly faster. The code for this would be (not run):
+
+```{r, eval=FALSE}
+diatones_m32 <-
+  brm(data = diatones[1:20,],
+      family = bernoulli,
+      stress_shifted ~ 1,
+      prior(normal(0, 10), class = Intercept),
+      file='models/diatones_m32.brm'
+  )
+```
+
+::: {#exr-bb2-3}
+a.  Visualize the posterior of model `diatones_m32`. This is the posterior of the single model parameter $\alpha$, the log-odds of \`stress_shifted = 1.
+
+b.  *Extra*: visualize the posterior of $\text{invlogit}(\alpha)$, i.e. $p_{\text{shift}}$. Does it look any different from the posterior for model `diatones_m31`?
+:::
+
+<!-- * Why is this prior effectively the same as flat? (What do -10 and 10 in log-odds mean in probability?) -->
+
+<!-- * Try refitting model `diatones_m31`, but just changing `binomial(link = "identity")` to `binomial` (i.e., logit link = logistic regression).  The model should not fit properly.  Why? (Hint: think about what your "uniform" prior means now.)   -->
+
+### Poisson regression {#sec-bb2-poisson}
+
+Another useful single-parameter model is *Poisson regression*. This can be thought of as logistic regression, in the case where $p$ is very small relative to $N$: we are counting how many times $y$ something happens, and there is no natural upper bound for $y$.
+
+$y$ could be the number of times each word appears in a corpus, the number of words in a lexicon with particular phonotactics, the number of languages spoken in a country, and so on. Poisson regression is not currently widely used for language data, but probably should be [@winter2021poisson].
+
+In Poisson regression, the *log* of counts <!-- ($log(y)$)  --> are modeled as a linear function of one or more predictors:
+
+$$
+\log(y) = \alpha + \beta_1 x_1 + \cdots
+$$ Because of the logarithm, the interpretation of $\exp(\alpha)$ is "average value of $y$, the interpretation of $\exp(\beta_1)$ is "how much $y$ is multiplied by when $x_1$ is increased by 1", and so on.
+
+Note the similarities with logistic regression: $\log$ (instead of logit) on the LHS, and no error term on the RHS. Just as logistic regression can be usefully thought of as modeling the probabilities $p_i$ of events occurring, Poisson regression can be thought of as modeling the *rates* $\lambda_i$ of events occurring:
+
+```{=tex}
+\begin{eqnarray}
+y_i & \sim \text{Poisson}(\lambda_i) \\
+\log(\lambda_i) & \sim \alpha + \beta_1 x_1 + \cdots
+\end{eqnarray}
+```
+Here $y_i$ follows the [Poisson distribution](https://en.wikipedia.org/wiki/Poisson_distribution), <!-- whose --> <!-- exact form won't matter for us (like we don't usually need to work with --> <!-- the actual binomial distribution), but --> which has an important property: **its mean and variance are equal**. This means that a Poisson regression model assumes that $E(y) = \text{var}(y)$: the amount of "dispersion" in the data is fixed.
+
+We will use as an example the `dyads` data, with $y$ the `gestures` count. The empirical distribution of `gestures` looks like:
+
+```{r}
+#| code-fold: true
+
+dyads %>% ggplot(aes(x=gestures)) + geom_histogram(bins=10)
+```
+
+For now we will assume there are no predictors: the only coefficient is the intercept. A Poisson model is a kind of generalized linear model ([GLM](https://en.wikipedia.org/wiki/Generalized_linear_model)), like logistic regression, so to fit a frequentist model we would use `glm()`[^week3-6]
+
+[^week3-6]: Specifically, `family=poisson` fits a Poisson model with a log link.
+
+```{r}
+dyads_freq_mod <- glm(gestures ~ 1, family= poisson, data=dyads)
+tidy(dyads_freq_mod)
+```
+
+The predicted mean of `gestures` is $e^{3.9}$=`exp(3.9)`, which is very close to the observed mean (`mean(dyads$gestures)`).
+
+To make a Bayesian model, we just need to add a prior for the intercept term; we use an uninformative prior. The probability model is:
+
+```{=tex}
+\begin{align}
+y & \sim \text{Poisson}(\lambda) \\
+\log(\lambda) & \sim N(0,10)
+\end{align}
+```
+(Here we have defined $\lambda = \exp(\alpha)$.) This prior is relatively flat over the range of reasonable mean counts ($\lambda$).
+
+To fit this model in brms:
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+dyads_m31 <-
+  brm(data = dyads,
+      gestures ~ 1,
+      family = poisson,
+      prior = prior(normal(0, 10), class='Intercept'),
+      file='models/dyads_m31.brm'
+  )
+```
+
+Let's extract posterior samples using `spread_draws()` from tidybayes:
+
+```{r}
+dyads_m31 %>% spread_draws(b_Intercept) -> dyads_m31_draws
+dyads_m31_draws
+```
+
+Plot the posterior of $\lambda$:
+
+```{r}
+#| code-fold: true
+
+dyads_m31_draws %>%
+  ggplot(aes(x = b_Intercept)) +
+  stat_halfeye() +
+  scale_x_continuous(expression(lambda:~"log(mean gestures)")) + 
+  ylab("Posterior probability")
+```
+
+The estimate and 95% CI looks very similar to the `glm()` (frequentist) model above.
+
+<!-- We can get a useful visualization combining with point/interval summaries of the posterior using `stat_halfeye`.^[See [this `ggdist` vignette](https://mjskay.github.io/ggdist/articles/slabinterval.html) for other possible visualizations.]  -->
+
+<!-- Here let's instead examine $\exp(\lambda)$, the mean gesture count, -->
+
+<!-- which is more interpretable. -->
+
+<!-- ```{r} -->
+
+<!-- dyads_m31_draws %>% -->
+
+<!--   ggplot(aes(x = exp(b_Intercept))) + -->
+
+<!--   stat_halfeye() + xlab("Mean gestures: exp(lambda)") -->
+
+<!-- ``` -->
+
+#### Posterior predictive checks {#ppcs}
+
+This is a good example to introduce *posterior predictive checks*: checking the model graphically comparing simulated datasets to the observed data.[^week3-7] The most basic PPC is to simulate $N$ new datasets for $y$ and plot their distributions on top of the observed distribution of $y$.
+
+[^week3-7]: For more detail, see @gabry2019visualization Sec. 4-5.
+
+We do this using `pp_check()` from brms, which is an interface to a wide range of PPCs from the useful [bayesplot package](https://cran.r-project.org/web/packages/bayesplot/vignettes/graphical-ppcs.html%5D).
+
+```{r}
+##  N=25 new datasets
+pp_check(dyads_m31, ndraws=25)
+```
+
+The extreme mismatch here suggests this is not a good model. It is visually clear what the problem is: The Poisson model matches the mean of `gestures` well, but not its variance.
+
+Another way to see this, which also introduces another useful posterior predictive check, is to plot different summaries of the distribution---such as its mean and variance:[^week3-8]
+
+[^week3-8]: Note that mean/var from all 4000 draws are now plotted, not just the first $N=25$.
+
+```{r}
+pp_check(dyads_m31, type='stat', stat='mean') /
+pp_check(dyads_m31, type='stat', stat='var')
+```
+
+The underlying issue is that the mean and variance of `gestures` are not equal, as assumed by the Poisson distribution. We will return to this below to motivate a new model type.
+
+::: callout-tip
+## Practical note
+
+In current practice, the first PPC plot (simulated data distribution overplotted on empirical distribution) is common as part of the standard checks one performs on a fitted model. PPC plots of posterior summaries, such as mean and variance, are not common. It's safe to say that we should be performing a lot more posterior predictive checks to evaluate our fitted model, but which PPCs are most appropriate will depend on your exact case. @mcelreath2020statistical 3.3.2.2 discusses this issue.
+:::
+
+::: {#exr-bb2-4}
+What is the ratio $\text{var}(y)/ \text{mean}(y)$ for the empirical data (`gestures`)?
+:::
+
+### Normal distribution: linear regression {#sec-bb2-normal}
+
+Let's move on to data distributed according to a normal distribution, which has two parameters:
+
+-   $\mu$: mean of $y$ (i.e. *expected value*: $E(y)$)
+-   $\sigma$: standard deviation of $y$ ($\text{var}(y) = \sigma^2$)
+
+Standard (frequentist) linear regression of $y$ as a function of 1+ predictors can be written:
+
+```{=tex}
+\begin{align}
+y &\sim N(\mu, \sigma) \\
+\mu & = \alpha + \beta_1 x_1 + \cdots
+\end{align}
+```
+Let's consider the simplest case, the intercept-only model. Two parameters are fitted:
+
+-   $\alpha$: "intercept"
+-   $\sigma$: "residual variance"
+
+Each observation $y_i$ is predicted to have the same value plus normally distributed noise.
+
+Example data: `english_250`
+
+-   `english` dataset from `languageR`[^week3-9]
+-   $y$: `RTlexdec` (lexical decision reaction time)
+-   Take a random subset of 250 observations, to make things more interesting.
+
+[^week3-9]: This dataset is from the languageR package @languageR and described in detail on its help page (`?english`) or in @baayen2008ald. Our use of this dataset follows @rmld-book (Sec. 4.1.2), where it is used extensively for linear regression.
+
+```{r}
+## set seed, so you'll get the same "random" sample
+set.seed(100)
+english_250 <- english[sample(1:nrow(english), 250),]
+```
+
+To write down a probability model for this case, we need priors on $\alpha$ and $\sigma$. As above, it makes sense to give $\alpha$ an "uninformative" prior, which requires knowing something about likely values of $y$. Its empirical distribution is:
+
+```{r}
+ggplot(aes(x=RTlexdec), data=english_250) +
+  geom_histogram(bins = 30) 
+```
+
+Note the $x$-axis range. Certainly $\alpha \sim N(0,100)$ would be an uninformative prior. (It's essentially flat over possible values of $\alpha$, say -10 to 10, corresponding to reaction times of 0.00005 to 22026 seconds!)
+
+What should the prior for $\sigma$ be? It must satisfy two conditions:
+
+-   Only allow positive values of $\sigma$ ($\sigma>0$).\
+-   It can't be flat; it must decrease as $\sigma$ increases.
+
+One choice, used by McElreath in Chap. 4, is $\sigma \sim \text{Uniform}(0,10)$---replacing 10 by however large a number is needed given the scale of $y$. This works for current purposes, but for more realistic models, neither uniform nor normal distributions turn out to be a good choice for variance parameters. Normal distributions are "light-tailed"---they decrease in probability too fast as $\sigma$ increase, making making MCMC sampling inefficient.
+
+It is better to instead use a "heavy-tailed" distribution, which decreases slowly as $\sigma$ is increased. Most commonly used are the *half-Cauchy* and *exponential* distributions with a large "scale" parameter [see @mcelreath2020statistical, Chap. 9].[^week3-10]
+
+[^week3-10]: More details: see @gelman2006prior, and updated recommendations in the [Stan Prior Choice Recommendations doc](https://github.com/stan-dev/stan/wiki/Prior-Choice-Recommendations).
+
+We will use the half-Cauchy distribution for now; this is the Cauchy distribution restricted to positive values. Here is what the PDF of $\sigma$ looks like when $\sigma \sim \text{HalfCauchy}(0,5)$ (scale = 0, shape = 5):
+
+```{r}
+#| code-fold: true
+data.frame(sig=seq(0, 20, by=0.1)) %>%
+  mutate(prob=dcauchy(sig, scale = 5)) %>% 
+  ggplot(aes(x=sig, y=prob)) +
+  geom_line() +
+  ylab("Prior probability (PDF)") + 
+  xlab("sigma")
+```
+
+This distribution decreases gradually from 0, with a "long tail": higher values of $\sigma$ are progressively less likely, but still have enough probability that they can be learned if the data strongly supports them. The scale here has been chosen so that the prior is effectively flat for possible values of $\sigma$: values of `RTlexdec` are always 6--7 range, so $\sigma$ is certainly not larger than \~1--2. (But if our $y$ ranged from 0 to 100, we'd need to choose a much larger scale parameter for $\sigma$ to make the prior "uninformative".) <!-- (TODO: where to read about why uniform, normal don't work) -->
+
+The probability model for $y$ (`RTlexdec`) is then:
+
+```{=tex}
+\begin{align}
+y & \sim N(\mu, \sigma) \\
+\mu & \sim N(0, 100) \\
+\sigma & \sim \text{HalfCauchy}(0,5)
+\end{align}
+```
+To fit this model in `brms`:
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+english_m31 <-
+  brm(data = english_250,
+      RTlexdec ~ 1,
+      family = gaussian,
+      prior = c(prior(normal(0, 100), class=Intercept),
+                prior(cauchy(0, 5), class = sigma)
+      ),
+      file='models/english_m31.brm'
+  )
+```
+
+(Note how `prior` is now a vector to set multiple priors.)
+
+This model results in posteriors for both the $\mu$ and $\sigma$ parameters:
+
+```{r}
+english_m31
+```
+
+Compare to the equivalent frequentist model, shown in @sec-bb2-extra: it estimates $\mu$ and $\sigma$ (the "residual variance"), but only $\mu$ is a first-class model parameter (shown with a SE, $p$, etc.).
+
+This means we could examine the posterior distribution for $\sigma$ (below), or for $\sigma$ and $\mu$ (see Exercise below)---though we have no particular reason to do so in this case.
+
+```{r}
+#| code-fold: true
+## compare to the prior, above
+english_m31 %>% 
+  spread_draws(sigma) %>%
+  ggplot(aes(x = sigma)) +
+  geom_density(fill = "black") +
+   ylab("Posterior PDF")
+```
+
+#### Parameter names
+
+Now that we are working with $>1$ parameter, let's familiarize ourselves with a couple more aspects of working with a `brms` model.
+
+To extract draws you need parameter names, which can be unclear from the `brms` output. You can always see all a model's parameters using `get_variables()`:
+
+```{r}
+get_variables(english_m31)
+```
+
+Anything ending with `__` are internal parameters of the MCMC algorithm which we typically ignore.[^week3-11]
+
+[^week3-11]: For example, `lp__` stands for "log posterior". Stan defines the log-posterior up to a constant, which is treated as an unknown variable; `lp__` is this "log kernel" (see [here](https://cran.r-project.org/package=rstan/vignettes/rstan.html#the-log-posterior-function-and-gradient) and [here](https://discourse.mc-stan.org/t/basic-question-what-is-lp-in-posterior-samples-of-a-brms-regression/17567/2)).
+
+#### Diagnostics: first look {#sec-bb2-diagnostics}
+
+When fitting `brms`/Stan models it is important to inspect the posterior samples to make sure the chains "mixed" properly and you really are getting a good sample from the posterior. This is an important difference from frequentist models, whose fitting algorithm will typically give you something sensible with default settings, regardless of the data you feed it (within reason).
+
+We will spend more time on model diagnostics soon, but for now note that `plot()` shows basic diagnostics: posterior distributions and *trace plots* for each parameter:
+
+```{r}
+plot(english_m31)
+```
+
+The trace plots look good: a "hairy caterpillar" with no chain visibly different from the others. This visual diagnostic is an important basic sanity check for any model fitted with MCMC, even simple ones.
+
+::: {#exr-bb2-5}
+a.  Examine the trace plot for `dyads_m31`, to help convince yourself that the model issue we found (predicted variance doesn't match the sample) isn't due to a fit issue.
+:::
+
+::: {#exr-bb2-6}
+a.  Extract posterior draws for `english_m31` of both $\alpha$ and $\sigma$ in one dataframe. (Hint: change the arguments of `spread_draws()`.
+
+b.  *Extra*: Make a heatmap showing the posterior over both variables ($x$-axis = $\alpha$, $y$-axis = $\sigma$, color=probability density). Hint: `geom_density_2d_filled()`, or see [@kurz2021statistical, 4.3.6].
+:::
+
+<!-- # ```{r} -->
+
+<!-- posterior_samples(english_m1) %>% -->
+
+<!--   ggplot(aes(x = b_Intercept, y=sigma)) + -->
+
+<!--   geom_density_2d_filled() -->
+
+<!-- ``` -->
+
+<!-- # Posterior predictive distribution -->
+
+<!-- ```{r} -->
+
+<!-- pp_check(dyads_m1) -->
+
+<!-- ``` -->
+
+<!-- More variability than assumed by the Poisson distribution: *overdispersion*.  What is going on here is that by fitting the mean of $y$ correctly, the model is forced to assume the variance of $y$ is also $\mu$---but in reality, the variance is  higher.   -->
+
+### Negative binomial distribution {#sec-bb2-nb}
+
+We saw above that model `dyads_m1` under-predicts variance. By fitting the mean of $y$ correctly, the model is forced to assume the variance of $y$ is also $\mu$---but in reality, the variance is much higher. This situation is called *overdispersion*, and is extremely common when fitting (frequentist or bayesian) Poisson models---the data is noisier than predicted by a Poisson distribution.[^week3-12]
+
+[^week3-12]: "Underdispersion" is theoretically possible, but much less common in practice. Overdispersion is so common that it is bad teaching to show you Poisson regression without discussing overdispersion, which is why we've taken this detour to a scary-sounding model.
+
+The [*negative binomial*](https://en.wikipedia.org/wiki/Negative_binomial_distribution) (or *gamma-Poisson*) model is a generalization of the Poisson distribution which allows $\sigma^2$ (variance of $y$) to be fitted, rather than assuming that it is the same as $\lambda$ (the mean of $y$).[^week3-13] For for our purposes, all we need to know is that a negative-binomial distribution is analogous to a normal distribution (scale and shape parameters), but for count data.
+
+[^week3-13]: See also [here](https://www.johndcook.com/blog/2009/09/22/negative-binomial-distribution/) or Ch. 11-12 of McElreath.
+
+Let's fit a negative-binomial (see [Kurz 12.1.2](https://bookdown.org/content/4857/monsters-and-mixtures.html#negative-binomial-or-gamma-poisson) if interested)) for this case to see what happens. The scale parameter has the same interpretation as for the Poisson model (log-mean-counts), so we use the same prior as above. Let's not worry about the interpretation of the shape parameter, and just use `brms`'s default prior.[^week3-14]
+
+[^week3-14]: If you are curious: the variance is $\sigma^2 = \mu(1 + \frac{\mu}{\phi})$ and the shape parameter is $\phi$, following the [alternative paramterization](https://mc-stan.org/docs/2_27/functions-reference/nbalt.html) in Stan. Thus, $\phi > 0$, and small/large $\phi$ = high/low overdispersion.)
+
+```{r, results=FALSE, message=FALSE, warning=FALSE}
+dyads_m32 <- brm(data = dyads, family = negbinomial,
+    gestures ~ 1,
+    prior = prior(normal(0, 10), class = Intercept),
+    file='models/dyads_m32.brm'
+)
+```
+
+```{r}
+dyads_m32
+```
+
+Note the less certain estimate for the intercept, relative to model `dyads_31`: this is a good thing.
+
+We should always check trace plots (which here look good):
+
+```{r}
+plot(dyads_m32)
+```
+
+The posterior now looks much closer to the empirical data:
+
+```{r}
+pp_check(dyads_m32, ndraws = 25)
+```
+
+This is clearly not a good model (note the mismatch especially around 25-60), which makes sense as it contains no predictors, but at least it now has the same rough shape as the empirical data. Both the predicted mean and variance now look reasonable, in the sense that the observed values lie within the distributions of predicted values:
+
+```{r, message = FALSE}
+pp_check(dyads_m32, type='stat', stat='mean') /
+pp_check(dyads_m32, type='stat', stat='var')
+```
+
+We can examine in particular the posterior distribution of $\text{var}(y)/\text{mean}(y)$, which we'll call $\phi$. We do this by defining a custom function `phi()`.
+
+```{r, message = FALSE}
+phi <- function(x){var(x)/mean(x)}
+pp_check(dyads_m32, type='stat', stat=phi)
+```
+
+The model now better captures the amount of dispersion in the data (variance/mean ratio).
+
+::: {#exr-bb2-7}
+Make the same plot for model `dyads_m31`, to make sure the model really does show overdisperson. (Observed $\phi$ value outside the predicted distribution of $\phi$.)
+:::
+
+## Appendix: Extra material {#sec-bb2-extra}
+
+### Frequentist logistic regression model
+
+```{r}
+m1_glm <- glm(stress_shifted ~ 1, data=diatones[1:20,], family=
+                'binomial')
+summary(m1_glm, conf.int = TRUE)
+```
+
+### Frequentist linear regression model
+
+```{r}
+english_m1_lm <- lm(RTlexdec ~ 1, data=english)
+
+summary(english_m1_lm)
+```
+
+### Poisson regression model with predictors {#sec-bb2-extra-poisson}
+
+::: {#exr-bb1-8}
+Consider the empirical effects of of `context` and `language` on `gesture` count:
+
+```{r}
+ggplot(aes(x=context, y=gestures), data=dyads) + geom_boxplot() + xlab("Context") + ylab("Gestures") + scale_y_log10()
+ggplot(aes(x=language, y=gestures), data=dyads) + geom_boxplot() + xlab("Context") + ylab("Gestures") + scale_y_log10()
+
+```
+
+(The $y$-axis is on a log scale, as usually makes sense for count data.)
+
+Fit this Poisson regression model:
+
+```{r}
+dyads_freq_mod2 <- glm(gestures ~ context + language , family= poisson, data=dyads)
+```
+
+What are the interpretations of the `context` and `language` coefficients?
+:::
+
+
+## Solutions
+
+### @exr-bb2-1
+
+a. The median of the posterior (for the `Intercept` coefficient) and the lower and upper bound of its 95% credible interval. 
+
+b. The standard deviation of the posterior.
+
+### @exr-bb2-3
+
+```{r}
+diatones_m32 %>% spread_draws(b_Intercept) %>% 
+  ggplot(aes(x = b_Intercept)) +
+  stat_halfeye()+
+  xlab("p_shift (log-odds)")+
+  ylab("Posterior probability")
+
+```
+
+
+
+
+### @exr-bb2-6
+
+Find the names of these two parameters:
+
+```{r}
+variables(english_m31)
+```
+
+They are `b_Intercept` and `sigma`.
+
+```{r}
+english_m31_draws <- english_m31 %>% spread_draws(b_Intercept, sigma)
+```
+
+Plot 2D heatmap:
+
+```{r}
+english_m31_draws %>%
+  ggplot(aes(x = b_Intercept, y = sigma)) +
+  geom_hex() +
+  xlab("b_Intercept") +
+  ylab("sigma")
+
+```
+

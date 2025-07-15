@@ -1,0 +1,535 @@
+# Causal Inference and Causal Discovery
+
+**Author**: [Amanda Doucette](https://www.amandadoucette.com/)
+
+**License**: CC-BY-SA-4.0 
+
+
+## Introduction
+
+This tutorial is a brief introduction to causal inference with a focus on how to choose "control variables" in a regression analysis, and a very brief introduction to using causal discovery algorithms to identify causal structure in data.
+
+For more detailed coverage of causal inference, see @rohrer2018thinking, @pearl2009, or @hernan2024causal. @malinsky2018causal provides a good introduction to causal discovery methods.
+
+We'll be using the following R libraries:
+
+```{r, message=FALSE, cache=FALSE}
+library(lme4)
+library(tidyverse)
+library(sjPlot)
+library(broom)
+library(arm)
+library(DT)
+library(languageR)
+library(ggdag)
+library(dagitty)
+library(pcalg)
+library(igraph)
+```
+
+## Data
+
+In this tutorial, we'll be looking at the `english` dataset from `languageR`. To learn more about the dataset, run `?english` in R, or see @baayen2008ald. To keep things simple, we'll only use a subset of the variables included in this data:
+
+- `RTlexdec`: Reaction time in a lexical decision task
+- `WrittenFrequency`: Log frequency from the CELEX lexical database
+- `Familiarity`: Subjective familiarity ratings
+- `AgeSubject`: Factor with levels `young` and `old`
+- `FrequencyInitialDiphoneWord`: Log frequency of the initial diphone
+
+Let's load the dataset and center the predictors:
+```{r}
+eng <- english %>%
+  mutate(
+    WrittenFrequency_c = rescale(WrittenFrequency),
+    Familiarity_c = rescale(Familiarity),
+    FrequencyInitialDiphoneWord_c = rescale(FrequencyInitialDiphoneWord),
+    AgeSubject_c = as.numeric(AgeSubject) - 1.5
+  ) %>%
+  dplyr::select(all_of(c(
+    "RTlexdec", "AgeSubject_c", "AgeSubject",
+    "WrittenFrequency_c", "Familiarity_c", "FrequencyInitialDiphoneWord_c"
+  )))
+```
+
+## Causal Inference
+
+As linguists, we often want to ask causal research questions: How does variable $X$ affect outcome $Y$? In the `english` dataset, we may want to ask "How does word frequency affect reaction time in a lexical decision task?" We could fit a simple regression model to estimate the effect of `WrittenFrequency` on `RTlexdec`:
+
+```{r}
+eng_m1 <- lm(RTlexdec ~ 1 + WrittenFrequency_c, data = eng)
+
+tidy(eng_m1, conf.int = TRUE)
+```
+
+This model tells us that there is a relationship between frequency and reaction time: Reaction times are shorter for more frequent words. But is this effect the same as the causal effect we're interested in?
+
+### What is a causal effect?
+
+Imagine we're running an experiment to determine how helpful listening to music in a second language is for learning it. We recruit a group of participants taking classes to learn a new language, and divide them into two groups. One, we tell to listen to music in their second language for an hour a day ($M_i = 1$). The other, we tell to avoid music in their second language, and continue attending classes as normal ($M_i = 0$). Before the experiment, we record each participants scores on a language test ($X_i$). 
+
+After some time, we administer another test, the outcome of the experiment $y_i$. For the group who listened to music, we call this outcome $y_i^1$, and for the group who did not listen to music, we call the outcome $y_i^0$. For each participant, we can imagine a possible world where they were placed in the other experimental group: For participants in the music-listening group, we can imagine their *potential outcome* $y_i^0$ had they been placed in the other group. The *causal effect* for each participant is the difference between these potential outcomes: $y_i^1 - y_i^0$.
+
+Of course, we can't observe these potential outcomes. This is the problem we aim to solve with causal inference.
+
+Our data will look something like this:
+
+| Participant $i$ | Pre-test $X_i$ | Group $M_i$ | $y_i^0$ | $y_i^1$ | Causal effect $y_i^1 - y_i^0$ |
+| --- | --- | -- | --- | --- | --- |
+| 1  | 53 | 1 | ??? | 72 | ??? |
+| 2  | 81 | 0 | 90 | ??? | ??? |
+| 3  | 67 | 1 | ??? | 58 | ??? |
+| 4  | 40 | 0 | 50 | ??? | ??? |
+| 5  | 39 | 1 | ??? | 85 | ??? |
+| 6  | 77 | 0 | 78 | ??? | ??? |
+
+There are several ways of getting around this problem. We'll cover one here: regression.
+
+If we can accurately predict the missing potential outcome for each participant, then we can get a good estimate of the causal effect. In this case, we can be fairly certain that the outcome for each participant was influenced by their prior knowledge of the language. There are many other variables that might predict post-experiment test scores, but for simplicity we'll assume that prior test scores are the only one that matters. Under this assumption, our outcome variables $y_i$ are directly caused by both prior test scores $X_i$ and experimental group $M_i$. Therefore, we can estimate the causal effect through regression:
+
+$$
+y_i = \beta_0 + \beta_1 X_i + \beta_2 M_i
+$$
+
+The parameter $\beta_2$ represents the causal effect listening to music on second-language test scores.
+
+
+### What variables do I include in my regression?
+
+"Controlling for" variables in a regression can allow us to estimate causal effects. But in real data, determining which variables need to be controlled for can be challenging.
+
+Consider the `english` dataset from `languageR`. For simplicity, we'll only consider a subset of the variables included in this dataset: `RTlexdec`, `AgeSubject`, `Familiarity`, `WrittenFrequency` and `FrequencyInitialDiphoneWord`.
+
+```{r}
+#| code-fold: true
+datatable(sample_n(eng, 10))
+```
+
+We want to know the effect of `WrittenFrequency` on `RTlexdec`. There are several options for which variables to include in a regression:
+
+#### 1. Only include the variable of interest.
+
+We only care about the effect of `WrittenFrequency`, so let's exclude everything else from our regression:
+
+```{r}
+eng_m2 <- lm(RTlexdec ~ 1 + WrittenFrequency_c, data = eng)
+
+tidy(eng_m2, conf.int = TRUE)
+```
+
+We can plot the partial effect of `WrittenFrequency` against the data. It looks reasonable.
+
+```{r}
+plot_model(eng_m2, type = "pred", terms = "WrittenFrequency_c") +
+  geom_point(aes(x = WrittenFrequency_c, y = RTlexdec), data = eng, size = 0.5)
+```
+
+#### 2. Include everything.
+
+Only including `WrittenFrequency` in our regression might not be the best choice.
+
+`RTlexdec` is correlated with `Familiarity`:
+
+```{r, message=FALSE}
+#| code-fold: true
+eng %>% ggplot(aes(x = Familiarity_c, y = RTlexdec)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+And with `FrequencyInitialDiphoneWord`:
+
+```{r, message=FALSE}
+#| code-fold: true
+eng %>% ggplot(aes(x = FrequencyInitialDiphoneWord_c, y = RTlexdec)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+And also with `AgeSubject`:
+
+```{r, message=FALSE}
+#| code-fold: true
+eng %>% ggplot(aes(x = AgeSubject, y = RTlexdec)) +
+  geom_jitter() +
+  geom_smooth(method = "lm")
+```
+
+All of these variables could reasonably predict `RTlexdec`, so we could include them in a regression:
+
+```{r}
+eng_m3 <- lm(RTlexdec ~ 1 + WrittenFrequency_c + Familiarity_c + FrequencyInitialDiphoneWord_c + AgeSubject_c, data = eng)
+
+tidy(eng_m3, conf.int = TRUE)
+```
+
+In this model, we see a `WrittenFrequency` effect of -0.07 (95\% CI: [-0.08, -0.06]). Like the previous model `eng_m2`, this is still negative, but much smaller.
+
+#### 3. Incude the predictors that perform best under some model comparison procedure.
+
+We could also fit multiple models, compare them, and choose the "best" model in our comparison. Using AIC, we would choose `eng_m3`, the model with all variables included.
+
+```{r}
+AIC(eng_m2, eng_m3)
+```
+
+#### 4. Include only the variables needed to make a causal inference.
+
+None of these procedures for choosing a model make any guarantees that the model output will be an estimate of the causal effect. To do this, we need to consider a causal model of the data. If we know that age directly influences reaction times, perhaps it should be included in the model. Written frequency and familiarity essentially represent the same information, so maybe only one should be included. To make this decision, we need to introduce a formal representation of a causal model: the DAG.
+
+
+### Representing causal models with DAGs
+
+We can use a *Directed Acyclic Graph* (DAG) to represent a causal graph. Vertices in the graph represent random variables, and directed edges (arrows connecting the vertices) represent direct causal relationships. *Directed* means that edges are arrows in one direction, while *acyclic* means that there are no cycles in the graph: There is no path from a variable back to itself.
+
+A causal DAG $X \rightarrow Y$ implies that $X$ directly causes $Y$. In other words, if we could experimentally intervene and change the value of $X$, $Y$ would change as well. However, if we changed the value of $Y$, $X$ would not change.
+
+As linguists, we have some background knowledge about the `english` dataset, and can represent our intuitions about its causal structure as edges in a DAG. These assumptions might be wrong, but we'll go with them for now:
+
+1. `AgeSubject` is a direct cause of `RTlexdec`: We know that older subjects are generally slightly slower to respond. This adds an arrow `AgeSubjext` $\rightarrow$ `RTlexdex` to our DAG.
+
+2. `WrittenFrequency` is a direct cause of `Familiarity`: A person's subjective familiarity with a word must be strongly influenced by its frequency. This adds an arrow `WrittenFrequency` $\rightarrow$ `Familiarity`.
+
+3. `WrittenFrequency` is *not* a direct cause of `RTlexdec`: Participants in the experiment don't know the actual frequencies of words in the corpus these frequencies were estimated with, they only know their own `Familiarity` with the words. There is no arrow from `WrittenFrequency` to `RTlexdec`.
+
+4. `WrittenFrequency` is a direct cause of `FrequencyInitialDiphoneWord`: The frequency of whole words is likely to have some influence on the frequency of their initial diphones. This adds an arrow `WrittenFrequency` $\rightarrow$ `FrequencyInitialDiphoneWord`.
+
+5. `FrequencyInitialDiphoneWord` is not a direct cause of anything: `AgeSubject` certainly isn't caused by initial diphone frequency. `Familiarity` depends on knowledge of the *whole* word, not on any diphone frequency -- familiar words can have low-frequency initial diphones. `WrittenFrequency` can't be caused by diphone frequency, because that would add a *cycle* to our DAG.
+
+This gives us the following causal DAG, which we can plot with `dagitty` and `ggdag`:
+
+```{r}
+#| code-fold: true
+dag1 <- dagitty('dag{
+    "DiphoneFreq" [pos="4,2"]
+    "WrittenFrequency" [pos="3,3"]
+    "Familiarity" [pos="3,2"]
+    "RTlexdec" [pos="3,1"]
+    "AgeSubject" [pos="2,2"]
+    "DiphoneFreq" <- "WrittenFrequency"
+    "WrittenFrequency" -> "Familiarity"
+    "Familiarity" -> "RTlexdec"
+    "RTlexdec" <- "AgeSubject"
+    }')
+
+ggdag(dag1) +
+  theme_dag() +
+  geom_dag_point(col = "gray") +
+  geom_dag_text(col = "black")
+```
+
+Causal DAGs can get quite large and complex, but we can break them down into smaller pieces to understand how variables are related. Three common structures have names that are worth knowing:
+
+#### 1. Chain: $A \rightarrow B \rightarrow C$
+
+A chain implies a causal association between $A$ and $C$. This association is *mediated* by $B$. Any directed path between two variables in a DAG transmits a causal association. Intervening on $A$ causes a change in $B$, which causes a change in $C$. We can generate a dataset to look at this relationship:
+
+```{r}
+chain <- tibble(
+  A = rnorm(1000, mean = 0),
+  B = map_dbl(A, function(i) rnorm(1, mean = i)),
+  C = map_dbl(B, function(i) rnorm(1, mean = i))
+)
+```
+
+If we "control for $B$" in a regression on this data, the causal effect of $A$ on $C$ is masked, even though we know there is a causal relationship. Controlling for $B$ effectively *blocks* the association between $A$ and $C$:
+
+```{r}
+chain_m1 <- lm(C ~ A + B, data = chain)
+
+tidy(chain_m1, conf.int = TRUE)
+```
+
+In a chain, we shouldn't control for the middle variable $B$ if we're intersted in the causal effect of $A$ on $C$. Removing $B$ from our model, we get a correct estimate of the causal effect:
+
+```{r}
+chain_m2 <- lm(C ~ A, data = chain)
+
+tidy(chain_m2, conf.int = TRUE)
+```
+
+
+#### 2. Fork: $A \leftarrow B \rightarrow C$
+
+A fork does not imply a causal association between $A$ and $C$. Instead, $A$ and $C$ share a *common cause*, $B$. Because $A$ and $C$ share a common cause, there is an association between them, but it is not causal. The causal effect of $A$ on $C$ is zero. Here, correlation very much does not imply causation. We can generate a dataset:
+
+```{r}
+fork <- tibble(
+  B = rnorm(1000, mean = 0),
+  A = map_dbl(B, function(i) rnorm(1, mean = i)),
+  C = map_dbl(B, function(i) rnorm(1, mean = i))
+)
+```
+
+And we can see that $A$ and $C$ are correlated, although they are not causally related:
+
+```{r, message=FALSE}
+#| code-fold: true
+fork %>% ggplot(aes(x = A, y = C)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+But if we fit a model controlling for $B$, we can see that $A$ in fact has no causal effect on $C$. Again, controlling for $B$ blocks the association between $A$ and $C$. Unlike the previous example of a chain, this is desirable -- there is no causal relationship between $A$ and $C$, so we want to block the non-causal association induced by $B$:
+
+```{r}
+fork_m1 <- lm(C ~ A + B, data = fork)
+
+tidy(fork_m1, conf.int = TRUE)
+```
+
+In a fork, the common cause variable is known as a *confounder*: it can induce spurious correlations and bias measurement of the true causal effect.
+
+#### 3. Collider: $A \rightarrow B \leftarrow C$
+
+Also known as an *inverted fork*, a collider does not transmit an association between $A$ and $C$. Manipulating $A$ has no effect on $C$.
+
+```{r}
+collider <- tibble(
+  A = rnorm(1000, mean = 0),
+  C = rnorm(1000, mean = 3),
+  B = map2_dbl(A, C, function(i, j) rnorm(1, mean = i + j))
+)
+```
+
+Here, $A$ and $C$ are not correlated:
+
+```{r, message=FALSE}
+#| code-fold: true
+collider %>% ggplot(aes(x = A, y = C)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+If we include $B$ in our model, we incorrectly conclude that $A$ has an effect on $C$:
+
+```{r}
+collider_m1 <- lm(C ~ A + B, data = collider)
+
+tidy(collider_m1, conf.int = TRUE)
+```
+
+Instead, $B$ should be excluded from the model:
+
+```{r}
+collider_m2 <- lm(C ~ A, data = collider)
+
+tidy(collider_m2, conf.int = TRUE)
+```
+
+#### Confounding and back-door paths
+
+To summarize the above examples in terms of "what to control for":
+
+1. In a chain $A \rightarrow B \rightarrow C$, controlling for $B$ blocks the causal association between $A$ and $C$, giving us **biased** causal effect estimate.
+2. In a fork $A \leftarrow B \rightarrow C$, controlling for $B$ blocks the non-causal association, giving us an **unbiased** causal effect estimate.
+3. In a collider $A \rightarrow B \leftarrow C$, controlling for $B$ unblocks the non-causal association, giving us a **biased** causal effect estimate.
+
+To estimate a causal effect between two variables, we want to ensure that all causal paths between them are unblocked, while all non-causal paths are blocked. Because forks transmit non-causal associations, any path $X \leftarrow \dots \rightarrow Y$ needs to be blocked. These paths are also called *back-door paths*.
+
+A path between two variables $X$ and $Y$ is blocked by a set of variables $\mathbf{Z}$ if and only if:
+
+1. It contains a fork $X \leftarrow W \rightarrow Y$ or a chain $X \rightarrow W \rightarrow Y$ where the middle variable $W$ is in the set $\mathbf{Z}$.
+2. It contains a collider $X \rightarrow W \leftarrow Y$ where the middle variable $W$ or any descendent of it is *not* in the set $\mathbf{Z}$.
+
+This is also known as *d-separation*. A set $\mathbf{Z}$ *d-separates* $X$ and $Y$ if it blocks every path from $X$ to $Y$.
+
+A causal effect is considered *identifiable* when it is possible to block all back-door paths in the DAG (under the assumption that the DAG is correct).
+
+### Causal inference in the `english` dataset
+
+Going back to our original example of the `english` data, we can now identify the causal effect of `WrittenFrequency` on `RTlexdec`. It turns out to be fairly straightforward.
+
+In our DAG, there is exactly one path between these variables: `WrittenFrequency` $\rightarrow$ `Familiarity` $\rightarrow$ `RTlexdec`. This path contains no forks, so it is not a back-door path, and does not need to be blocked to estimate the causal effect.
+
+There are no other paths from `WrittenFrequency` to `RTlexdec`, so including any other variables in our regression would only bias our estimate of the effect.
+
+This means we should use our first model, `eng_m2`, to estimate the causal effect of `WrittenFrequency` on `RTlexdec`, although it performed worse in our model comparison. The best *causal* model is not always the same as the best *predictive* model: Including `Familiarity` as a predictor improved the model's performance under AIC, an estimator of prediction error, but confounded our causal effect estimate^[See @arif2022predictive for more discussion of predictive and causal models, written for ecologists.].
+
+
+#### The causal effect of `DiphoneFreq` on `RTlexdec`
+
+Let's look at a more complicated example. Suppose we want to estimate the causal effect of `DiphoneFreq` on `RTlexdec`. While we can manually figure out the backdoor paths in this DAG, you might be dealing with a much larger, interconnected set of variables in the future. Luckily, the `dagitty` package provides some convenient functions for figuring out the set of variables to control for in estimating a causal effect. To do this, first we input our DAG:^[The `[pos=x,y]` indicators are completely optional, and are only used to provide a better layout for graphing functions.]
+
+```{r}
+eng_dag <- dagitty('dag{
+    "DiphoneFreq" [pos="4,2"]
+    "WrittenFrequency" [pos="3,3"]
+    "Familiarity" [pos="3,2"]
+    "RTlexdec" [pos="3,1"]
+    "AgeSubject" [pos="2,2"]
+    "DiphoneFreq" <- "WrittenFrequency"
+    "WrittenFrequency" -> "Familiarity"
+    "Familiarity" -> "RTlexdec"
+    "RTlexdec" <- "AgeSubject"
+    }')
+```
+
+In `dagitty` (and in much of the causal inference literature), *independent variables* are referred to as *exposure variables*, and *dependent effects* referred to as *outcome variables*. We can add these to our DAG:
+
+```{r}
+exposures(eng_dag) <- "DiphoneFreq"
+outcomes(eng_dag) <- "RTlexdec"
+```
+
+While we have been referring to the additional variables in our analysis as *control variables*, `dagitty` refers to them as *adjustment variables*. An adjustment set is a minimal set of variables to control for to determine a causal effect. To calculate this set for our DAG:^[Also possible: `adjustmentSets(eng_dag, exposure = "DiphoneFreq", outcome = "RTlexdec")`]
+
+```{r}
+adjustmentSets(eng_dag)
+```
+
+This gives us two possible adjustment sets. We can control for either `WrittenFrequency` or `Familiarity` to estimate the causal effect of `DiphoneFreq` on `RTlexdec`. We can fit both models with `lm`:
+
+```{r}
+eng_m4 <- lm(RTlexdec ~ 1 + WrittenFrequency_c + FrequencyInitialDiphoneWord_c, data = eng)
+
+tidy(eng_m4, conf.int = TRUE)
+```
+
+```{r}
+eng_m5 <- lm(RTlexdec ~ 1 + Familiarity_c + FrequencyInitialDiphoneWord_c, data = eng)
+
+tidy(eng_m5, conf.int = TRUE)
+```
+
+Whether we control for `WrittenFrequency` or `Familiarity`, we get the same result: Initial diphone frequency has no effect on reaction time. This is expected, given our DAG: There is only one path from `DiphoneFreq` to `RTlexdec`, and it contains a fork, so we block it to estimate the causal effects. There are no paths left, so we get zero causal effect.
+
+#### The causal effect of `AgeSubject` on `Familiarity`
+
+We can estimate the causal effect of age on familiarity in the same way:
+
+```{r}
+exposures(eng_dag) <- "AgeSubject"
+outcomes(eng_dag) <- "Familiarity"
+
+adjustmentSets(eng_dag)
+```
+
+In this case, the adjustment set is empty, because `RTlexdec` is a collider and already blocks the non-causal path between `AgeSubject` and `Familiarity`. Next we fit a model with no control variables:
+
+```{r}
+eng_m6 <- lm(Familiarity_c ~ 1 + AgeSubject_c, data = eng)
+
+tidy(eng_m6, conf.int = TRUE)
+```
+
+As we would expect, age has no causal effect on familiarty.
+
+### Direct effects and mediation
+
+In a chain such as `WrittenFrequency` $\rightarrow$ `Familiarity` $\rightarrow$ `RTlexdec`, the middle variable is known as a *mediator*. Before, we were interested in how changing `WrittenFrequency` impacts `RTlexdec`. This is also called the *total effect* of `WrittenFrequency`.
+
+But, knowing that the relationship between `WrittenFrequency` and `RTlexdec` is mediated by `Familiarity`, we may also want to ask a different question: What is the remaining effect of frequency after accounting for familiarity? This is called a *direct effect*.
+
+`dagitty` can also tell us what to control for to estimate a direct effect:
+
+```{r}
+adjustmentSets(
+  eng_dag,
+  exposure = "WrittenFrequency",
+  outcome = "RTlexdec",
+  effect = "direct"
+)
+```
+
+To answer this question, we can fit a model controlling for familiarity. However, if we look at our DAG, we can see that controlling for `Familiarity` blocks the only path between `WrittenFrequency` and `RTlexdec`. We should see zero direct causal effect.
+
+Let's fit the model:
+
+```{r}
+eng_m7 <- lm(RTlexdec ~ 1 + WrittenFrequency_c + Familiarity_c, data = eng)
+
+tidy(eng_m7, conf.int = TRUE)
+```
+
+`WrittenFrequency` still has a negative effect, even after controlling for `Familiarity`. This result is inconsistent with our DAG. Why? There are multiple possibilities.
+
+#### 1. Measurement error
+
+This effect, which was not predicted by our DAG, could be a result of measurement error in the dataset. This seems unlikely here, but is a possibility that should be considered in other datasets.
+
+#### 2. An unmeasured confounder
+
+Perhaps our DAG is missing a variable. It is generally a strong assumption that a dataset includes *all* causally relevant variables. An unmeasured confounder will lead to an unblocked back-door path.
+
+For example, if we add an unmeasured variable to our DAG, it might look like this:
+
+```{r}
+#| code-fold: true
+eng_dag2 <- dagitty('dag{
+    "DiphoneFreq" [pos="4,2"]
+    "WrittenFrequency" [pos="3,3"]
+    "Familiarity" [pos="3,2"]
+    "RTlexdec" [pos="3,1"]
+    "AgeSubject" [pos="2,2"]
+    "U" [pos="2.5,2"]
+    "DiphoneFreq" <- "WrittenFrequency"
+    "WrittenFrequency" -> "Familiarity"
+    "Familiarity" -> "RTlexdec"
+    "RTlexdec" <- "AgeSubject"
+    "U" -> "WrittenFrequency"
+    "U" -> "RTlexdec"
+    }')
+
+ggdag(eng_dag2) +
+  theme_dag() +
+  geom_dag_point(col = "gray") +
+  geom_dag_text(col = "black")
+```
+
+We can get an adjustment set for the direct effect in this new DAG:
+
+```{r}
+adjustmentSets(
+  eng_dag2,
+  exposure = "WrittenFrequency",
+  outcome = "RTlexdec",
+  effect = "direct"
+)
+```
+
+We need to control for both `Familiarity` and the unmeasured variable `U`. We don't have `U` in our dataset, so we cannot get an unbiased estimate of the effect if this is the correct DAG.
+
+Unmeasured confounders in general are a problem for causal inference. All of the methods described here assume a *causally sufficient set*: A set of variables that includes all common causes of all variables in the set. These methods also assume that the DAG being used for your analysis is accurate. If in reality there are missing arrows or incorrect arrows, your causal inference could be wrong.
+
+Subject matter knowledge and experimental evidence can help to verify the correctness of a DAG, but in general it is difficult to know if a causal DAG is 100% correct.
+
+In some cases, you might not even have an idea of how the variables are causally related. To solve this problem, a different set of methods exist to infer causal structure from data.
+
+## Causal Discovery
+
+Causal discovery or *causal search* is the problem of identifying causal structure from observational data. We won't go into detail about the algorithms here, but we can use the implementations in the `pcalg` package on the `english` data.
+
+We'll use the PC algorithm^[named for its creators, Peter Spirtes and Clark Glymour], which is able to identify causal structure up to a *Markov equivalence class*. A single dataset can correspond to multiple causal DAGs -- with the data alone, it is impossible to tell which is correct within an equivalence class. This uncertainty is represented with *bidirected edges* in the output of the algorithm. A bidirected edge $X \leftrightarrow Y$ implies that there is no way to distinguish between two possibilities: $X \rightarrow Y$ and $X \leftarrow Y$.
+
+The PC algorithm depends on *conditional independence tests* to determine the existence of edges in the DAG. We'll use `pcalg`'s `gaussCItest`, which assumes our data is normally distributed. We also need to provide the `pc` function with "sufficient statistics" to conduct the conditional independence tests. In this case, that's a list including a correlation matrix and the number of variables in our data. We also need to provide a significance level `alpha` and a list of `labels` for the variables:
+
+```{r}
+# drop the AgeSubject column that was used for plotting earlier
+eng_disc <- eng %>% dplyr::select(-c(AgeSubject))
+
+pc_dag_out <- pc(
+  suffStat = list(C = cor(eng_disc), n = nrow(eng_disc)),
+  indepTest = gaussCItest,
+  labels = colnames(eng_disc),
+  alpha = 0.01
+)
+
+summary(pc_dag_out)
+```
+
+The output includes an *adjacency matrix*, a representation of the edges in the discovered graph. We can plot the graph using the `plot` function from the `igraph` package:
+
+```{r}
+# convert the adjacency matrix into an igraph object
+pc_dag <- graph_from_adjacency_matrix(as(pc_dag_out, "amat"))
+
+plot(
+  pc_dag,
+  layout = layout_nicely,
+  vertex.label.dist = 3.5,
+  edge.color = "black"
+)
+```
+
+The DAG discovered by the PC algorithm looks similar to the one shown above, with an additional edge between `WrittenFrequency` and `RTlexdec`. The PC algorithm cannot identify unmeasured confounders, so it is possible that there is an unmeasured variable between these variables. We also see uncertainty in edge direction: There are bidirected edges, and edges implying that `RTlexdec` causes age, familiarity, and frequency. We were able to find a reasonable *skeleton* for the DAG, but not edge directions. Other causal discovery algorithms exist, some of which can identify unmeasured confounders. 

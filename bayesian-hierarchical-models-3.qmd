@@ -1,0 +1,556 @@
+# Bayesian Hierarchical Models 3 {#sec-bhm-3}
+
+These lecture notes cover topics from:
+
+-   @mcelreath2020statistical and @kurz2021statistical: topics from the last two weeks.
+-   Either of:
+    -   @bdacs, Sec. 5.2.6
+    -   @wolock2020distributional <!-- [Wollock (2020)](https://www.tmwolock.com/index.php/2020/12/18/distributional-regression-models-brms-tutorial/). -->
+
+Topics:
+
+-   Hypothesis testing for BHMs
+-   Distributional regression
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE, cache=FALSE}
+library(brms)
+library(lme4)
+library(arm)
+library(tidyverse)
+
+library(tidybayes)
+library(bayestestR)
+
+library(bayesplot)
+library(loo)
+
+library(broom) ## for tidy model summaries
+library(broom.mixed) ## for tidy model summaries for lme4 models
+
+library(patchwork)
+```
+
+::: {.callout-tip collapse="true"}
+### Practical notes
+
+1.  If you have loaded `rethinking`, you need to detach it before using brms. See @kurz2021statistical Sec. 4.3.1.
+
+2.  I use the `file` argument when fitting `brms` models to make compiling this document easier (so the models don't refit every time I compile). You may or may not want to do this for your own models. See `file` and `file_refit` arguments in `?brm`.
+
+3.  Here I set the `file_refit` option so "brms will refit the model if model, data or algorithm as passed to Stan differ from what is stored in the file."
+
+```{r}
+options(brms.file_refit = "on_change")
+```
+
+4.  I use `chains = 4, cores = 4` when fitting `brm` models below---this means 4 chains, each to be run on one core on my laptop. `cores = 4` may need to be adjusted for your computer. (You may have fewer or more cores; I have 8 cores, so this leaves 50% free.) **You should figure out how to use multiple cores on your machine**.
+
+5.  Make numbers be printed only to 3 digits, for neater output:
+
+```{r}
+options(digits = 3)
+```
+:::
+
+### Data
+
+Load and preprocess the `neutralization` data, as in @sec-hbm2-data:
+
+```{r}
+neutralization <- read.csv("https://osf.io/qg5fc/download", stringsAsFactors = TRUE) %>%
+  mutate(voicing_fact = fct_relevel(voicing, "voiceless")) %>%
+  filter(!is.na(prosodic_boundary)) %>%
+  mutate(
+    prosodic_boundary = rescale(prosodic_boundary),
+    voicing = rescale(voicing_fact),
+    item_pair = as.factor(item_pair),
+    subject = as.factor(subject)
+  )
+
+## Code multi-level factors with Helmert contrasts
+## so that all predictors are centered
+contrasts(neutralization$vowel) <- contr.helmert
+contrasts(neutralization$place) <- contr.helmert
+```
+
+## Hypothesis testing
+
+The `neutralization` data is a good case to illustrate aspects of hypothesis testing for Bayesian models:
+
+a.  The distinction between "existence" and "significance" measures
+b.  Model comparison using prediction (LOO, WAIC) vs. likelihood (Bayes factor).
+c.  How tests differ for fixed and random effect terms.
+
+\(a\) and (b) were introduced for non-hierarchical models in @sec-brm1-ess, while (c) is new for hierarchical models.
+
+We will use the final model of the `neutralization` data fitted in the last chapter, which we refit as `neutralization_m11_1`. This is the same model as `neutralization_m10_3`, but with this argument added, to save all parameter draws:
+
+```{r, eval = FALSE}
+save_pars = save_pars(all = TRUE)
+```
+
+is necessary for calculating Bayes Factors in general (see [here](https://easystats.github.io/bayestestR/articles/bayes_factors.html#bayesfactor_models)). We'll fit all models in this chapter using this argument, just to be consistent.
+
+```{r}
+## same prior as prior_2 in previous chapter
+prior_11_1 <- c(
+  prior(normal(150, 75), class = Intercept), # beta_0
+  prior(normal(0, 50), class = b),
+  prior(exponential(0.02), class = sd), # random-effect SDs
+  prior(lkj(2), class = cor), # random-effect correlation matrices
+  prior(exponential(0.02), class = sigma) # residual variance
+)
+
+neutralization_m11_1 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~ voicing + place + vowel + prosodic_boundary +
+    (1 + voicing + place + vowel + prosodic_boundary | subject) +
+    (1 + voicing + prosodic_boundary | item_pair),
+  prior = prior_11_1,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  save_pars = save_pars(all = TRUE),
+  file = "models/neutralization_m11_1.brm"
+)
+```
+
+### Fixed effects
+
+#### Existence and significance
+
+The *existence* of the `voicing` fixed effect is clear from the posterior of `neutralization_m11_1`. We can confirm this by calculating $p_d$ (see @sec-brm1-ie):
+
+```{r}
+pd(neutralization_m11_1)
+```
+
+For significance, we calculate $p_{\text{ROPE}}$ (see @sec-brm1-rope), assuming a rope of \[-5 msec, 5 msec\]:
+
+```{r}
+rope(neutralization_m11_1, range = c(-5, 5), ci = 1)
+```
+
+We can be fairly confident that the `voicing` effect is practically significant (because $p_{\text{ROPE}}$ is near 0).
+
+::: {#exr-bhm3-1}
+Recall that it's not actually clear what the ROPE should be for the neutralization data: anywhere between 5 and 10 msec could be argued to be functionally equivalent to 0 (@sec-hbm2-rqs).
+
+How would our conclusion change, if at all, if the ROPE were \[-8, 8\]? \[-10, 10\]?
+:::
+
+#### Bayes factor vs. LOO comparison
+
+Recall that to calculate Bayes Factors, we should re-fit the model with more iterations (@sec-brm1-bf), at least 40,000 posterior samples. This is left as an exercise for all Bayes Factor calculations in this chapter---since re-fitting each model may take a long time on your computer (each one takes a couple of minutes on mine), we’ll just compute Bayes Factors using our current models (fitted with fewer iterations) and assume they are accurate enough.[^week11-1] For a "real" analysis, make sure to use enough iterations.
+
+[^week11-1]: To confirm this is OK, you can re-run each Bayes Factor-computing command (e.g. `bf_pointnull()`, `bayes_factor()`) a few times and check that the BF doesn't change much.
+
+Now, calculate the Bayes Factor for the `voicing` fixed effect using our current model:
+
+```{r}
+bf_pointnull(neutralization_m11_1)
+```
+
+The `voicing` row assesses: how significant is the `voicing` fixed effect?
+
+BF = 10-30 is "strong evidence" and 30-100 is "very strong", so there is substantial evidence that the effect is meaningful.
+
+Another way to assess the importance of `voicing` would be to use LOO (@sec-model-quality) to compare two models, with and without the `voicing` term:
+
+-   `neutralization_m11_1`
+-   The same model, with the `voicing` fixed effect excluded.
+
+(Note that we don't need extra iterations for LOO comparison.)
+
+Fit the second model:
+
+```{r}
+## same as neutralization_m11_1, with the 'voicing'
+## fixed effect removed
+neutralization_m11_2 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~  place + vowel + prosodic_boundary +
+    (1 + voicing + place + vowel + prosodic_boundary | subject) +
+    (1 + voicing + prosodic_boundary | item_pair),
+  prior = prior_11_1,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  save_pars = save_pars(all = TRUE),
+  file = "models/neutralization_m11_2.brm"
+)
+```
+
+::: {.callout-tip collapse="true"}
+### Practical note: updating a model
+
+The `update()` command is an elegant way to re-fit models with terms added or removed. For example, instead of the `brm()` call just above, we could do:
+
+```{r, eval = FALSE}
+neutralization_m11_2 <- update(neutralization_m11_1, . ~ . - voicing, chains = 4, cores = 4, iter = 2000)
+```
+
+I am not using `update()` commands in these notes, just for clarity.
+:::
+
+To do the model comparison, we first compute LOO for both models:
+
+```{r}
+## Compute LOO for both models
+neutralization_m11_1 <- add_criterion(neutralization_m11_1, c("loo"), cores = 4)
+neutralization_m11_2 <- add_criterion(neutralization_m11_2, c("loo"), cores = 4)
+```
+
+<!-- There's a warning here, which we obey: -->
+
+<!-- ```{r} -->
+
+<!-- neutralization_m11_1 <- add_criterion(neutralization_m11_1, c("loo"), cores = 4, moment_match = TRUE) -->
+
+<!-- ``` -->
+
+Model comparison:
+
+```{r}
+loo_compare(neutralization_m11_1, neutralization_m11_2)
+```
+
+Suppose we are using the "more conservative" method from @sec-example-nonlinear: choose the simplest model that doesn't differ from others by more than two standard errors.
+
+The models are not clearly different in terms of predictive accuracy. This is because the `voicing` term improves predictive accuracy little---it is a small effect, as expected. But it is clearly not *zero*, or in the ROPE, which is what matters for our research questions.
+
+This illustrates how "improves predictive accuracy" does not necessarily line up with "scientifically important", a point emphasized by @mcelreath2020statistical (e.g. Sec. 7.5.1): a model with better predictive performance isn't necessarily the one that more accurately reflects reality (= has the correct causal structure).[^week11-2] <!-- Vasishth et al.: "In general, even with moderate sample size, it can be difficult to compare nested hierarchical models (such as linear --> <!-- mixed models) based on predictive performance" (citing @wang2015difficulty).^[McElreath makes similar points, usually with "has a causal effect" rather than "is scientifically important".]   -->
+
+[^week11-2]: "This result just echoes the core fact about WAIC (and CV and PSIS \[a.k.a LOO\]): It guesses predictive accuracy, not causal truth. A variable can be causally related to an outcome, but have little relative im pact on it, and WAIC \[or LOO\] will tell you that. That is what is happening in this case. We can use WAIC/CV/PSIS to measure how big a difference some variable makes in prediction. But we cannot use these criteria to decide whether or not some effect exists."
+
+::: {#exr-bhm3-2}
+One application of model comparison is checking whether a factor (= predictor with multiple levels) significantly contributes to a model.
+
+a.  Consider the contribution of `place` to model `neutralization_m11_1`. Why can't we just example a $p_d$ value to assess this predictor's contribution to the model?
+
+b.  Carry out model comparisons using BF and LOO to assess whether `place` significantly contributes.
+
+Note that calculating the BF here works differently from above---you need to fit two models (say: `m1` and `m2`) with and without the term(s) of interest, then compare them using `bayes_factor(m1, m2)`. An example is shown just below.
+
+<!-- For this to work, you'll need to have fitted `m1` and `m2` with all parameter draws saved, by including `save_pars = save_pars(all = TRUE))` in your `brm()` call---as we did above when fitting `neutralization_m11_1`.   -->
+
+c.  *Extra*: Re-do (b), now operationalizing "does `place` significantly contribute?" as "do the fixed *and* random effects involving `place` matter?" (rather than just the fixed effects).
+
+<!-- ```{r} -->
+
+<!-- neutralization_m11_noplace <- update(neutralization_m11_1, . ~ . - place, chains = 4, cores = 4, iter = 2000) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- neutralization_m11_noplace <- add_criterion(neutralization_m11_noplace, c("loo"), cores = 4) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- loo_compare(neutralization_m11_noplace, neutralization_m11_1) -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- neutralization_m11_1_withpars <- update(neutralization_m11_1, save_pars = save_pars(all = TRUE)) -->
+
+<!-- neutralization_m11_noplace_withpars <- update(neutralization_m11_noplace, save_pars = save_pars(all = TRUE)) -->
+
+<!-- bayes_factor(neutralization_m11_1_withpars, neutralization_m11_noplace_withpars) -->
+
+<!-- ``` -->
+:::
+
+### Random effects
+
+For a random-effect SD, there is no $p_{d}$ to calculate---the SD must be positive.
+
+Let's consider the by-subject `voicing` slope SD, relevant for research question 2 for the `neutralization data` (@sec-hbm2-rqs).
+
+To address "existence" of the by-speaker random slopes, we could compare models with and without this term, via Bayes Factor or LOO. Let's again use LOO for model comparison.
+
+We'll need to fit a subset model, dropping the the by-speaker random slope of `voicing` and related correlation terms:
+
+<!-- Fit the subset model: -->
+
+```{r}
+## 'voicing' removed from by-subject random effects
+neutralization_m11_3 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~ voicing + place + vowel + prosodic_boundary +
+    (1 + place + vowel + prosodic_boundary | subject) +
+    (1 + voicing + prosodic_boundary | item_pair),
+  prior = prior_11_1,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  save_pars = save_pars(all = TRUE),
+  file = "models/neutralization_m11_3.brm"
+)
+```
+
+<!-- ] -->
+
+Model comparison:
+
+```{r}
+neutralization_m11_3 <- add_criterion(neutralization_m11_3, c("loo"), cores = 4, moment_match = TRUE) # moment_match used to avoid a warning you get otherwise
+loo_compare(neutralization_m11_1, neutralization_m11_3)
+```
+
+The interpretation is similar to the model comparison above, assuming we're again using the "simplest model that doesn't differ by more than 2 SE" rule: allowing speakers to vary in the `voicing` effect doesn't improve predictive performance.
+
+For "significance" of this random effect, we'll consider ways to calculate $p_{rope}$ for the by-speaker random slope of voicing. There is no standard ROPE width, i.e. an answer to "how much by-speaker variability is effectively the same as no by-speaker variabilty"? We'll consider two intuitive options.
+
+First, we could make use of the same domain-specific knowledge as when defining ROPE for a fixed-effect coeffficient above: that 5 msec is a very small effect. We could say that the ROPE is \[0, 1.25\], where 1.25 is 5/4, since this would mean that 95% of speakers differ in the `voicing` effect by 5 msec (= $\pm$ 2 SD).
+
+Use `hypothesis()` to compute: what percentage of the posterior for the by-speaker random-slope SD for `voicing`, which we'll call $\sigma_{voicing}$, lies below 1.25?
+
+```{r}
+# this illustrates one way to write random effect terms in brms::hypothesis
+hypothesis(neutralization_m11_1, "voicing < 1.25", class = "sd", group = "subject")
+```
+
+Another possibility, which doesn't require domain-specific knowledge, would be to define "speakers vary very little" relative to the `voicing` fixed effect: perhaps 1/10 of its magnitude.
+
+This `hypothesis()` call asks what percentage of the time $\sigma_voicing$ is less than 10% of the magnitude of $\beta_{voicing}$ (the fixed effect).
+
+```{r}
+# this illustrates another way to write random effect terms in brms::hypothesis
+hypothesis(neutralization_m11_1, "sd_subject__voicing < abs(b_voicing)/10", class = NULL)
+```
+
+Note that this call takes into account uncertainty in the fixed effect (which is good), by calculating in what percentage of posterior draws $\sigma_{voicing} < \beta_{voicing}/10$.
+
+By either option, $p_{rope}$ is about 0.02, suggesting that speakers differ meaningfully in the `voicing` effect.
+
+::: {#exr-bhm3-3}
+a.  We might also define "significance" (effect size) in terms of individual subjects. Let X = "percentage of subjects with voicing effects outside the ROPE". This measures the proportion of subjects who have functionally zero `voicing` effects. Suppose the ROPE is \[-5,5\].
+
+-   The `sub_voicing_sim` dataframe, defined in @sec-hbm2-mp, contains posterior draws of by-subject voicing effects. Use this to calculate X.
+
+<!-- with a 95% CI. -->
+
+<!--   * For each value of `.draw` (posterior draw), calculate X -->
+
+<!--   * This gives a distribution of X values.  Calculate its median and 95% quantiles. (Hint: `tidybayes::median_qi`) -->
+
+<!-- sum(sub_voicing_sim$sub_voicing>5)/nrow(sub_voicing_sim) -->
+
+b.  Interpret the results of the LOO model comparison, on the one hand, and a "signficance" calculation done above (this could be either your answer to (b), or a $p_{\text{ROPE}}$ calculated above). What does the model say, **qualitatively**, about interspeaker variability?
+
+c.  *Extra* Calculate a Bayes Factor comparing `neutralization_m11_1` and `neutralization_m11_3`.\
+
+-   Do you need to increase the number of iterations used when fitting these models? (How can you check?)
+:::
+
+Part (b) of this exercise is an example of how a Bayesian model can be interpreted intuitively, using a quantity of interest. We define a quantity $X$ that addresses our question, then calculate the posterior distribution of $X$. Here, $X$ is "percentage of subjects with `voicing` effects larger than 5 msec \[the just-noticeable difference for vowel duration\]".
+
+### Fixed and random effects {#sec-brm3-far}
+
+To assess the question "does $X$ matter?", it often makes sense to ask a fitted model, "how much do all fixed *and* random-effect terms involving $X$ contribute?"
+
+For our example, we could assess "whether `voicing` matters"---which combines RQs 1 and 2---by fitting a new version of `neutralization_m11_1` without any `voicing` information. Fit this model:
+
+```{r}
+prior_2 <- c(
+  prior(normal(150, 75), class = Intercept), # beta_0
+  prior(normal(0, 50), class = b),
+  prior(exponential(0.02), class = sd), # random-effect SDs
+  prior(lkj(2), class = cor), # random-effect correlation matrices
+  prior(exponential(0.02), class = sigma) # residual variance
+)
+
+neutralization_m11_4 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~ place + vowel + prosodic_boundary +
+    (1 + place + vowel + prosodic_boundary | subject) +
+    (1 +  prosodic_boundary | item_pair),
+  prior = prior_2,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  save_pars = save_pars(all = TRUE),
+  file = "models/neutralization_m11_4.brm"
+)
+```
+
+Model comparison using LOO:
+
+```{r}
+## first, calculate LOO for the subset
+## model
+neutralization_m11_4 <- add_criterion(neutralization_m11_4, c("loo"), cores = 4)
+```
+
+```{r}
+loo_compare(neutralization_m11_1, neutralization_m11_4)
+```
+
+Let's also compute a Bayes Factor, to show an example of comparing two models differing in multiple terms.[^week11-3]
+
+[^week11-3]: Here we've used the `bayesfactor_models()` function from the easytestR package. This is just a wrapper to functionality from the bridgesampling package @bridgesampling, which is doing the real work.
+
+```{r}
+bayesfactor_models(neutralization_m11_1, neutralization_m11_4, verbose = FALSE)
+```
+
+The Bayes Factor here is \~0.
+
+::: {#exr-bhm3-4}
+Interpret the BF and LOO results, from just above, qualitatively: what do they say about the question "does `voicing` matter"?
+:::
+
+<!-- Bayes Factor comparing this model with `neutralization_m11_1`: -->
+
+## Distributional regression {#sec-brm3-dr}
+
+Models so far in this course always only involve the *mean* of a distribution, which is modeled as a function of predictors, by-subject variability, etc. But other parameters could vary as well; such *distributional regression* models are easily fitted using `brms`/Stan ([vignette](https://cran.r-project.org/web/packages/brms/vignettes/brms_distreg.html)). We'll consider models where the residual variability, $\sigma$ ("degree of noise") is modeled, for linear regression.
+
+This kind of model could let us address research questions involving (by-observation) variability. (Example: for VOT data, are voiced stops "more variable" than voiceless stops?)
+
+We will fit a distributional extension of our `neutralization` model, following the steps shown in @bdacs Sec. 5.1.6.
+
+One situation where we'd need such a model is when the research questions are about "noise"/variability---as in @ciaccio2022investigating (who also give a tutorial on these models using brms). Another example, from phonetics, is @sonderegger2023how (code [here](https://osf.io/xubqm/)).
+
+But, most of the time, our research questions will not be about this kind of variability. How might we decide we need such a model, even if the RQs don't involve noise?
+
+Across all data, a posterior predictive check of our `neutralization` model looks decent:[^week11-4]
+
+[^week11-4]: The mismatch in shape the right end of the distribution turns out to be because a log-transformation of `vowel_dur` is appropriate. You can try fitting a model of `log(vowel_dur)`, or a model of `vowel_dur` with `family=lognormal`, to check.
+
+```{r}
+pp_check(neutralization_m11_1, ndraws = 50, type = "dens_overlay")
+```
+
+However, we know that subjects differ a lot in how they speak during a production experiment. Some will speak formally, others casually; some may have had more sleep than others; and so on. This could lead to the degree of "noise" differing by subject. To see if this could be happening, consider the same plot, by-subject:
+
+```{r}
+ppc_dens_overlay_grouped(neutralization$vowel_dur,
+  yrep =
+    posterior_predict(neutralization_m11_1,
+      ndraws = 100
+    ),
+  group = neutralization$subject
+)
+```
+
+It does look like the degree of noise may vary by subject, e.g. 13, 14, 15. We can check this more directly by doing a PP check for the standard deviation, by subject:
+
+```{r}
+pp_check(neutralization_m11_1,
+  type = "stat_grouped",
+  ndraws = 1000,
+  group = "subject",
+  stat = "sd"
+)
+```
+
+For some subjects, the observed value of SD lies outside the model's predicted values, suggesting allowing residual SD to differ by-subject could make sense.
+
+For the sake of this example, we might also wonder whether the amount of noise differs by `voicing`:
+
+```{r}
+ppc_dens_overlay_grouped(neutralization$vowel_dur,
+  yrep =
+    posterior_predict(neutralization_m11_1,
+      ndraws = 100
+    ),
+  group = neutralization$voicing_fact
+)
+```
+
+(This could be part of the search for any difference in `vowel_duration` by `voicing`.) It seems unlikely from this plot, but we will include a term in the model to confirm.
+
+This model will allow residual SD is allowed to differ by-subject, and by `voicing`. The SD for subject $j$ is modeled as:
+
+```{=tex}
+\begin{align}
+\sigma_j & = \exp(\sigma + \beta^*_{voicing} + u_j) \\
+u_j & \sim N(0, \tau) \\
+\end{align}
+```
+Here, $\exp(\sigma)$ is the "average" residual SD; $\beta^*_{voicing}$ is the difference in residual SD between `voicing`=-0.5 and 0.5 (in log space), and $u_j$ is the offset for subject $j$.
+
+The exponential parametrization is used so that $\sigma_j$ stays positive for all subjects. For priors, we use:
+
+-   $\sigma \sim N(0, \log(50))$ : because $\sigma$ is now inside an exponential, and its old prior had width 50.
+-   $\beta^*_{voicing} \sim N(0, \log(50))$: similar
+-   $\tau \sim \exp(0.25)$ : because log(50) is the scale, and 1/log(50) $\approx$ 0.25.
+
+Reminder: if you are not comfortable determining weakly-informative priors, it's always an option to just use brms' default priors (see @sec-brm2-mgf). This would correspond to just omitting the `prior` argument in the `brm()` call below.
+
+```{r}
+prior_6 <- c(
+  prior(normal(150, 75), class = Intercept), # beta_0
+  prior(normal(0, 50), class = b),
+  prior(exponential(0.02), class = sd), # random-effect SDs
+  prior(lkj(1.5), class = cor), # random-effect correlation matrices
+  prior(normal(0, log(50)), class = Intercept, dpar = sigma),
+  prior(normal(0, log(50)), class = b, dpar = sigma),
+  prior(exponential(0.25),
+    class = sd, group = subject,
+    dpar = sigma
+  )
+)
+
+neutralization_m11_4 <- brm(
+  data = neutralization,
+  brmsformula(
+    vowel_dur ~ voicing + place + vowel + prosodic_boundary +
+      (1 + voicing | subject) + (1 + voicing | item_pair),
+    sigma ~ 1 + voicing + (1 | subject)
+  ),
+  prior = prior_6,
+  save_pars = save_pars(all = TRUE),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "models/neutralization_m11_4.brm"
+)
+```
+
+```{r}
+summary(neutralization_m11_4)
+```
+
+Note the new terms here:
+
+-   `sigma_Intercept`
+-   `sigma_voicing`
+-   `sd(sigma_Intercept)`
+
+The 95% CI for `sd(sigma_Intercept)` is clearly above zero (speakers differ in the degree of noise), while the 95% CI for \``sigma_voicing` overlaps zero (residual SD doesn't differ by `voicing`), as expected from our plots above.
+
+New posterior predictive checks:
+
+```{r}
+## looks similar
+pp_check(neutralization_m11_4, ndraws = 50, type = "dens_overlay")
+
+## any better?
+ppc_dens_overlay_grouped(neutralization$vowel_dur,
+  yrep =
+    posterior_predict(neutralization_m11_4,
+      ndraws = 100
+    ),
+  group = neutralization$subject
+)
+
+pp_check(neutralization_m11_4,
+  type = "stat_grouped",
+  ndraws = 1000,
+  group = "subject",
+  stat = "sd"
+)
+```
+
+The differences from the previous model are small, but we can see that the new model is slightly better. There is no no subject for whom the observed SD is outside the distribution of predicted SDs.
+
+There would probably be larger changes (as in the [@bdacs] example) if we had more data per subject.
+
+::: {#exr-bhm3-5}
+Perform a model comparison to check whether allowing $\sigma$ to vary, by (both) speaker and by `voicing` level, is justified. That is: does the data support using a distributional mixed-effects model rather than a normal (non-distributional) mixed-effects model?
+:::

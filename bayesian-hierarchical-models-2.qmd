@@ -1,0 +1,564 @@
+# Bayesian Hierarchical Models 2 {#sec-bhm-2}
+
+These lecture notes cover topics from:
+
+-   @mcelreath2020statistical Sec. 13.3-13.5.2, 14.0-14.1
+-   @kurz2021statistical : same sections
+
+Topics:
+
+-   BHMs with more complex random effects
+    -   Multiple grouping factors
+    -   Random slopes and correlations
+-   Model predictions: random effects
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE, cache=FALSE}
+library(brms)
+library(lme4)
+library(arm)
+library(tidyverse)
+
+library(tidybayes)
+library(bayestestR)
+
+library(bayesplot)
+library(loo)
+
+library(broom) ## for tidy model summaries
+library(broom.mixed) ## for tidy model summaries for lme4 models
+
+library(patchwork)
+```
+
+::: {.callout-tip collapse="true"}
+### Practical notes
+
+1.  If you have loaded `rethinking`, you need to detach it before using brms. See @kurz2021statistical Sec. 4.3.1.
+
+2.  I use the `file` argument when fitting `brms` models to make compiling this document easier (so the models don't refit every time I compile). You may or may not want to do this for your own models. See `file` and `file_refit` arguments in `?brm`.
+
+3.  Here I set the `file_refit` option so "brms will refit the model if model, data or algorithm as passed to Stan differ from what is stored in the file."
+
+```{r}
+options(brms.file_refit = "on_change")
+```
+
+4.  I use `chains = 4, cores = 4` when fitting `brm` models below---this means 4 chains, each to be run on one core on my laptop. `cores = 4` may need to be adjusted for your computer. (You may have fewer or more cores; I have 8 cores, so this leaves 50% free.) **You should figure out how to use multiple cores on your machine**.
+:::
+
+Make numbers be printed only to 3 digits, for neater output:
+
+```{r}
+options(digits = 3)
+```
+
+### Data {#sec-hbm2-data}
+
+Load the `neutralization` data from *RMLD* [@rmld-book]---where this dataset is described in more detail (Sec. 3.3.1)---and perform some preprocessing (described in Sec. 10.1).
+
+```{r}
+neutralization <- read.csv("https://osf.io/qg5fc/download", stringsAsFactors = TRUE) %>%
+  mutate(voicing_fact = fct_relevel(voicing, "voiceless")) %>%
+  filter(!is.na(prosodic_boundary)) %>%
+  mutate(
+    prosodic_boundary = rescale(prosodic_boundary),
+    voicing = rescale(voicing_fact),
+    item_pair = as.factor(item_pair),
+    subject = as.factor(subject)
+  )
+
+## Code multi-level factors with Helmert contrasts
+## so that all predictors are centered
+contrasts(neutralization$vowel) <- contr.helmert
+contrasts(neutralization$place) <- contr.helmert
+```
+
+Recall that for this data:
+
+-   `voicing` is of primary interest
+-   The response is `vowel_dur`
+-   There are two grouping factors, `item_pair` and `subject`
+-   `voicing` varies within both item and subject
+-   `prosodic_boundary`, `vowel`, `place` are controls.
+
+## Multiple grouping factors {#sec-brm2-mgf}
+
+Let's fit a first model of the `neutralization` data, with:
+
+-   A realistic set of fixed effects: `voicing` (of primary interest), plus all controls: `vowel`, `place`, `prosodic_boundary`.
+-   Random intercepts for `item_pair` and `subject`
+
+This is not a good model (we'd need random slopes for `voicing`), but it will do for now.
+
+Let's first fit a frequentist `lmer()` model, to compare to what we'll get with the Bayesian model:
+
+```{r}
+neut_m1 <- lmer(vowel_dur ~ voicing + vowel + place + prosodic_boundary + (1 | item_pair) + (1 | subject), data = neutralization)
+```
+
+```{r}
+summary(neut_m1, correlation = FALSE)
+```
+
+To fit a Bayesian model, we need to set priors. We will determine weakly informative priors, for practice.
+
+To choose a prior for the intercept, note that the response variable `vowel_dur`, has range of about 50--300:
+
+```{r}
+ggplot(aes(x = vowel_dur), data = neutralization) +
+  geom_density(fill = "blue", alpha = 0.25)
+```
+
+Let's use the following priors:
+
+-   Intercept: $N(150, 50)$
+    -   Whatever the intercept corresponds to in this model, reasonable values must be positive (vowel duration can only be positive).[^week10-1]
+-   $\beta_i$: $N(0, 50)$ --- a change of 50 (msec) in `vowel_duration` is huge.
+-   Random intercept variances: $\text{Exponential}(0.02)$
+
+[^week10-1]: The intercept here actually corresponds to "average value of `vowel_dur`", which must be positive. From `?prior()`: "Note that technically, this prior is set on an intercept that results when internally centering all population-level predictors around zero to improve sampling efficiency. On this centered intercept, specifying a prior is actually much easier and intuitive than on the original intercept, since the former represents the expected response value when all predictors are at their means."
+
+Why is $\lambda = 0.02$ for the exponential prior, $\text{Exponential}(\lambda)$? $\lambda$ should be on the order of 1/$SD_y$, the standard deviation of the response variable, to be "weakly informative".[^week10-2] The $\text{Exponential(1)}$ prior we've seen in other models was based on the assumption that $y$ has been standardized. In this case, it has not: `sd(neutralization$vowel_dur)` is `r round(sd(neutralization$vowel_dur),1)`, so $\lambda$ should be around 0.02.
+
+[^week10-2]: This is because $\lambda$ describes how fast the exponential prior decreases: a larger value means a faster decrease.
+
+::: {.callout-tip collapse="true"}
+### Practical note: Weakly-informative vs. default priors
+
+Remember: **if you are not comfortable determining weakly-informative priors, it's always an option to just use brms' default priors**, by not specifying the `prior` argument of your model. `brms` is particularly good for weakly-informative default priors for random effects (see `?prior()` Sec. 2). To use these, we'd remove the `class = sd` line from our prior statement when fitting the model. Using weakly-informative priors is best practice, but it is better to use default/flat priors you don't understand than to risk fitting a model with priors that don't make sense.
+
+It's also a good idea to use brms default priors whenever you just don't understand what a model parameter is doing. (Well, the second-best idea, after actually understanding it.). This can happen even if you're pretty comfortable with Bayesian models, when you move to a new model type. For example: if you fit a negative binomial model, everything might make sense except the `shape` parameter, which in fact requires substantial digging in documentation to find a good definition. It's fine to just use `brms`'s default prior for it.
+:::
+
+```{r, results=FALSE}
+neutralization_m10_1 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~ voicing + place + vowel + prosodic_boundary + (1 | subject) + (1 | item_pair),
+  prior = c(
+    prior(normal(150, 50), class = Intercept), # beta_0
+    prior(normal(0, 50), class = b),
+    prior(exponential(0.02), class = sd) # sigma
+  ),
+  iter = 4000, warmup = 2000, chains = 4, cores = 4,
+  file = "models/neutralization_m10_1.brm"
+)
+```
+
+```{r}
+summary(neutralization_m10_1)
+```
+
+Here is one possible visualization of the model's coefficients:
+
+```{r}
+# One possible posterior plot, showing all non-random effect parameters except intercept:
+# regexp means "anything starting with b_X, where X doen't begin with I, and anything starting with s".
+mcmc_plot(neutralization_m10_1, variable = c("^b_[^I]", "^s"), regex = TRUE)
+```
+
+::: {#exr-bhm2-1}
+a.  Match every fitted parameter shown in the Bayesian model output (there are 12) to the frequentist model output and verify that their values are (practically) the same.
+
+<!-- b. Which parameters have errors in the Bayesian but not the frequentist model? -->
+
+b.  Make plots of the marginal effect of vowel for model `neutralization_m10_1` (as in @sec-bhm2-plotting-effects): one plot for an “average item/speaker” (CIs), and another for a new observation (PIs).
+
+<!-- (PIs).method = `posterior_predict()`). -->
+:::
+
+<!-- **Exercise** -->
+
+<!-- * Examine some diagnostics (trace plots, $\hat{R}$, etc.) to convince yourself the model is OK (In the sense of a good sample from the posterior.) -->
+
+Recall that the model contains many more fitted parameters than shown in the summary, where none of the random effects are shown. To see all parameters:
+
+```{r}
+posterior_summary(neutralization_m10_1)
+```
+
+Because the posterior distribution is over *all* terms, we can examine the posterior for any parameter(s), using tools to manipulate the posterior from previous models (@sec-brm-1).
+
+For example, to examine just the posterior for the by-item and by-subject random intercept variances:
+
+```{r}
+#| code-fold: true
+
+neutralization_m10_1 %>%
+  spread_draws(sd_item_pair__Intercept, sd_subject__Intercept) %>%
+  ggplot(aes(x = sd_item_pair__Intercept, y = sd_subject__Intercept)) +
+  geom_hex() +
+  xlab("by-item variability") +
+  ylab("by-subject variability") +
+  geom_vline(aes(xintercept = 0), lty = 2) +
+  geom_hline(aes(yintercept = 0), lty = 2) +
+  geom_abline(lty = 1, alpha = 0.2)
+```
+
+A $y = x$ line has been added here to aid in an exercise.
+
+::: {#exr-bhm2-2}
+a.  Based on the plot just above and/or the model's output, do you think that subjects or items vary more in vowel duration? Explain.
+
+b.  This question can be formally tested using this command:
+
+```{r, eval = FALSE}
+hypothesis(neutralization_m10_1, "sd_subject__Intercept > sd_item_pair__Intercept", class = NULL)
+```
+
+Run this command to evaluate the hypothesis: `Post.Prob` is $p_d$ and `Evid.Ratio` is a Bayes Factor.
+:::
+
+## Random slopes
+
+Our model of the `neutralization` data above included by-subject and by-item random intercepts, with a set of control predictors. We now allow the `voicing` effect, which is of key interest, to vary by-subject and by-item, i.e. *random slopes*.
+
+### Research questions {#sec-hbm2-rqs}
+
+Our research questions will be:
+
+1.  Is there an overall effect of `voicing`?
+2.  What by-subject variability is there in the `voicing` effect?
+
+It will be important background knowledge that:
+
+-   The `voicing` effect is expected to be small.
+-   A small enough `voicing` effect is functionally zero (humans can't perceive the duration difference).
+    -   We will assume below that "small enough" is 5 msec, but other values might be reasonable (\~5-10 msec).[^week10-3]
+
+[^week10-3]: See discussion in *RMLD* Sec. 3.2.3.2 and @kirby2018mixed.
+
+### Frequentist model
+
+This model updates `neut_m1` to add random slopes:
+
+```{r}
+neut_m2 <- lmer(vowel_dur ~ voicing + place + vowel + prosodic_boundary +
+  (1 + voicing | subject) + (1 + voicing | item_pair), data = neutralization)
+```
+
+```{r}
+summary(neut_m2, correlation = FALSE)
+```
+
+This simple model, which includes the minimal random intercepts and slopes needed for the research questions, is singular. This is due to "perfect" random effect correlations, which are likely pathological. Fitting issues like singular models or non-convergence are common in mixed-effects models with linguistic data and often require substantial effort in model selection. Chapter 10 of *RMLD* covers these issues in detail. But as we'll see below, using Bayesian models goes a long way to solving them.
+
+Ignoring the perfect correlations: the model predicts a clear `voicing` effect, with some variability by subject and item.
+
+### Priors for random-effect terms
+
+Note that the random-effect terms in this model—describing covariance among random effects—are decomposed into:
+
+-   $k$ random effect *variances*
+-   A matrix of $k(k-1)/2$ *correlations*
+
+For this model:
+
+-   By-subject random effects: 2 variances, 1 correlation (=2x2 matrix)
+-   By-item random effects: 2 variances, 1 correlation (=2x2 matrix)
+
+This is standard for frequentist mixed-effects models, though we usually don't think about the parametrization, especially when focused on fixed effects.
+
+In a Bayesian model, we must understand this decomposition (at a high level) because both the random-effect variances and the correlation matrix need priors.
+
+The priors are typically set as:
+
+-   One prior for each variance
+-   One prior for each correlation matrix
+
+Instead of setting a prior for the entire covariance matrix, we decompose it into these components, just like in the `lmer()` output.[^week10-4]
+
+[^week10-4]: Only the lower half of the correlation matrix is shown because the matrix is symmetric.
+
+For variances, we can use the same priors as for random intercepts or residual $\sigma$ variance.
+
+For correlation matrices, we use the LKJ prior, $LKJ(\eta)$:
+
+-   $\eta = 1$: flat
+-   $0 < \eta < 1$: extreme correlations (closer to 1/-1) favored
+-   $\eta > 1$: extreme correlations disfavored.
+
+See @kurz2021statistical 14.1.3 for intuition on LKJ priors.
+
+Since random-effect correlations near 1/-1 are unlikely, it is common to fit Bayesian mixed-effects models using LKJ priors with $\eta > 1$. A common choice is $\eta = 2$, which we'll use below, though this is somewhat arbitrary.[^week10-5]
+
+[^week10-5]: Even $\eta = 1.02$ can help the model avoid extreme correlations, though more iterations may be needed for convergence.
+
+### A first model {#sec-hbm2-fm}
+
+We'll fit the Bayesian equivalent of model `neut_m2`, using similar priors to `neutralization_m10_1`.
+
+-   Fixed effects
+    -   Intercept: $N(150, 75)$
+    -   Each coefficient $\beta_i$: $N(0, 50)$
+-   Random effects
+    -   Residual variance: $\sigma \sim \text{Exponential}(0.02)$
+    -   Random effect variances: SDs $\sim \text{Exponential}(0.02)$
+    -   Random effect correlation matrices: $LKJ(2)$
+
+Except for the LKJ prior, the justifications are the same as for `neutralization_m10_1`.
+
+```{r}
+prior_1 <- c(
+  prior(normal(150, 75), class = Intercept), # beta_0
+  prior(normal(0, 50), class = b),
+  prior(exponential(0.02), class = sd), # random-effect SDs
+  prior(lkj(2), class = cor), # random-effect correlation matrices
+  prior(exponential(0.02), class = sigma) # residual variance
+)
+
+```
+
+Fit model:
+
+```{r}
+neutralization_m10_2 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~ voicing + place + vowel + prosodic_boundary +
+    (1 + voicing | subject) + (1 + voicing | item_pair),
+  prior = prior_1,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "models/neutralization_m10_2.brm"
+)
+
+```
+
+```{r}
+summary(neutralization_m10_2)
+```
+
+Posterior for the `voicing` term (RQ 1):
+
+```{r}
+plot(neutralization_m10_1, variable = "b_voicing")
+```
+
+There is also substantial by-subject and by-item variability in the `voicing` effect. We can see from the 95% CIs on those random-slope terms that it is unclear whether items or subjects vary more.
+
+To address individual variability, the posterior estimate for `sd(voicing)` tells us the model is confident there is some variability, but not how much: the 95% CredI is \[1.13, 9,54\].
+
+Just for fun, here is a visualization of all effects whose parameters end with `voicing`---which includes the two effects discussed just above:
+
+```{r}
+mcmc_intervals(neutralization_m10_2, pars = vars(ends_with("voicing")))
+```
+
+This illustrates the useful [tidy parameter selection](https://mc-stan.org/bayesplot/reference/tidy-params.html) functionality, which bayesplot functions (like `mcmc_intervals()`) can use to pick out variable names of interest.
+
+### A "Maximal" model
+
+<!-- As illustrated by the models above: -->
+
+<!-- <!-- (including the exercise):  -->
+
+Regularizing correlations tends to change fixed-effect estimates little, while allowing complex random effect structures which are important for accurately estimating fixed effects.
+
+Recall, from Chap 8 and 10 of *RMLD*:
+
+-   Random effect correlations were a big issue for frequentist mixed models.
+-   Different approaches to building up random effect structure ("maximal" vs. "data-driven" vs. "uncorrelated first") all agree on the importance of adding many random slope terms.
+-   The simplest recipe was to fit a "maximal" model (*RMLD* Chap. 8) , with all possible random slopes.
+    -   This often wasn't feasible, because the random effect structure is too complex for the data (especially given the number of correlations), causing the model to be singular or not converge.\
+    -   The basic issue was **overfitted random effect structure**.
+
+<!-- %fixed-effect terms of interest, but  -->
+
+With a Bayesian model, we can just set a regularizing prior on random effect terms, and fit a random effect structure with a large number of terms. In other words, "maximal" models are always possible. This is not magic -- using a very complex random-effect structure for a small dataset just means you will get random-effect parameter estimates which reflect the prior more, and may lower power on fixed-effect estimates.[^week10-6] But the *practical* fitting issues which bedevil us for frequentist mixed-effects models are gone.
+
+[^week10-6]: The discussion in RMLD Chapter 10 on the benefits and risks of more/less complex random effect structure still holds: more and less complex random effect structure both run risks, and rather than applying a recipe it is best to decide on a random effect structure with research questions in mind.
+
+<!-- "Maximal" models are possible, even with large numbers of random slopes, thanks to the regularizing prior on the correlation matrix. -->
+
+Let's fit a maximal model to this data, using an $LKJ(2)$ prior for correlations:
+
+```{r}
+prior_2 <- c(
+  prior(normal(150, 75), class = Intercept), # beta_0
+  prior(normal(0, 50), class = b),
+  prior(exponential(0.02), class = sd), # random-effect SDs
+  prior(lkj(2), class = cor), # random-effect correlation matrices
+  prior(exponential(0.02), class = sigma) # residual variance
+)
+
+## by-speaker random slopes for all predictors
+## by-item random slopes for all predictors which vary within item.
+neutralization_m10_3 <- brm(
+  data = neutralization,
+  family = gaussian,
+  vowel_dur ~ voicing + place + vowel + prosodic_boundary +
+    (1 + voicing + place + vowel + prosodic_boundary | subject) +
+    (1 + voicing + prosodic_boundary | item_pair),
+  prior = prior_2,
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "models/neutralization_m10_3.brm"
+)
+```
+
+```{r}
+summary(neutralization_m10_3)
+```
+
+::: {#exr-bhm2-3}
+Verify that the estimates for the terms of interest for the RQs have barely changed between models `neutralization_m10_3` and `neutralization_m10_2`:
+
+-   `voicing` fixed effect
+-   By-speaker `voicing` random slope SD
+
+NB:
+
+-   This requires first determining the relevant row of `## Multilevel Hyperparameters:` in the model output.
+-   This does *not* require refitting the models, which might take a while on your computer (\~6 minutes for student laptops in 2024). The model summaries are shown above.
+
+<!-- (The by-speaker correlation estimate differs, but this is not of interest for our RQs.) -->
+:::
+
+::: {#exr-bhm2-4}
+Refit `neutralization_m10_3` as a frequentist model. What issue is there?
+:::
+
+## Model predictions: random effects {#sec-hbm2-mp}
+
+Our second RQ relates to by-subject differences in the effect of `voicing`. How can we examine these?
+
+In the frequentist model, we could just look at the distribution of estimated `voicing` effects for each subject, using the `coefficients()` function:
+
+```{r}
+coefficients(neut_m2)$subject
+```
+
+Each subject's predicted `voicing` slope is the seecond column.
+
+To do the same for the Bayesian model, we can apply the same `coefficients()` function, but the syntax to access by-`subject` effects is different:
+
+```{r}
+## For the "maximal" model:
+# model predicted voicing effect for each speaker: estimated random effect + fixed-effect
+coefficients(neutralization_m10_3)$subject[, , "voicing"]
+```
+
+Note the errors/CredI's here, where frequentist model only outputs point estimates.
+
+Plot the distribution of these values:
+
+```{r}
+#| code-fold: true
+
+coefficients(neutralization_m10_3)$subject[, , "voicing"] %>% data.frame() %>%
+  ggplot(aes(x = Estimate)) +
+  geom_density() +
+  geom_rug() +
+  geom_vline(aes(xintercept = 0), lty = 2) +
+  xlab("Speaker voicing effect estimates")
+```
+
+The model predicts that all subjects have positive `voicing` effects.
+
+These are the by-subject offsets we would see in the posterior summary (`posterior_summary(neutralization_m10_3)`), added to the model's estimate for `b_voicing`.
+
+<!-- ```{r} -->
+
+<!-- # by- -->
+
+<!-- posterior_summary(neutralization_m10_3)  -->
+
+<!-- ``` -->
+
+What's shown in the `coefficients()` output is one of two ways to capture uncertainty in speaker `voicing` effects---incorporating <!-- #This does not incorporate any of the uncertainty in the speaker voicing` effects, from  --> uncertainty in the fixed effect coefficient and the by-speaker random effects:[^week10-7]
+
+[^week10-7]: I think! TODO: check that `coefficients()` output incoroprates both sources of uncertainty.
+
+1.  Compute predictions for *observed* subjects, with PIs.
+2.  Compute predictions for *new* subjects, with PIs.
+
+These two ways, illustrated in @mcelreath2020statistical Sec. 13.5.1-13.5.2, are subtly but importantly different. (1) is shown above. It would would be appropriate if we are interested in these particular subjects. (2) is appropriate if we are interested in what the model predicts about individual differences, but not these particular subjects (they are just a random sample). (2) incorporates an extra source of uncertainty, in the degree of by-subject variability in the `voicing` effect.
+
+We can implement (2) as follows:
+
+1.  Draw values for (a) $\beta_{voicing}$ and (b) the by-subject `voicing` slope SD
+2.  Use these to simulate the `voicing` effect for one new subject.
+3.  Do this 2000 times.
+4.  Plot the distribution.
+
+This can be thought of as the posterior predictive distribution of the `voicing` effect for a *random* new speaker. Workflow adapted from @kurz2021statistical, Sec. 13.5.2:
+
+```{r}
+# nbumber of simulated subjects
+n_sim <- 2000
+
+sub_voicing_sim <- neutralization_m10_3 %>%
+  # draw (a) and (b)
+  spread_draws(b_voicing, sd_subject__voicing, ndraws = n_sim) %>%
+  ## for each draw, simulate a single new speaker's voicing effect
+  mutate(sub_voicing = rnorm(n(), mean = b_voicing, sd = sd_subject__voicing))
+```
+
+These estimates look like:
+
+```{r}
+sub_voicing_sim %>% head()
+```
+
+Plot the distribution:
+
+```{r}
+#| code-fold: true
+
+sub_voicing_sim %>% ggplot(aes(x = sub_voicing)) +
+  geom_density(fill = "grey") +
+  xlab("By-speaker voicing effect") +
+  geom_vline(aes(xintercept = 0), lty = 2) +
+  ylab("Posterior predictive distribution density")
+```
+
+::: {#exr-bhm2-5}
+Both density plots immediately above show a distribution of model-predicted `voicing` effects, across subjects, calculated in two different ways.
+
+a.  How are they different? (width? mode?)
+
+b.  Why do these plots look different?
+
+c.  What would the answer to RQ2 be using the first plot? Using the second plot? Which one makes more sense / why?
+:::
+
+::: {#exr-bhm2-6}
+## Extra
+
+Before drawing any firm conclusions about what the model predicts about individual differences, it would be good to examine uncertainty in these predictions.
+
+a.  Make a spaghetti plot showing uncertainty in the *distribution* of by-speaker voicing effects.
+
+-   That is: draw 50 new values of `b_voicing` and `sd_subject__voicing`. For each draw, simulate 100 new subjects, and plot the distribution of their `voicing` effects. The resulting plot should show 50 densities/distributions, overplotted.
+
+b.  How, if at all, has the answer to "what does this model say about RQ2" changed relative to the plot showing just a single distribution of by-speaker voicing effects?
+:::
+
+<!-- - conclusion about *correlation* would differ somewhat, if this was of interest. -->
+
+<!-- Compare:frequentist model: -->
+
+<!-- ```{r} -->
+
+<!-- neutralization_freq_m10_2 <- lmer(vowel_dur ~ voicing + place + vowel + prosodic_boundary +  -->
+
+<!--                                     (1+voicing+place+vowel+prosodic_boundary|subject) + -->
+
+<!--                              (1+voicing+prosodic_boundary|item_pair),  -->
+
+<!--                              data=neutralization) -->
+
+<!-- ``` -->
+
+<!-- **Exercises** -->
+
+<!-- * Your `lmer` model above should give estimates equivalent to `sd_item_pair__Intercept` and `sd_subject__Intercept` -- these are point estimates of the degree of by-item and by-subject variability.  Based on these estimates, does `vowel_dur` vary more by-item or by-subject? -->
+
+<!-- * Using the bayesian model `neutralization_m81`, you can actually *test* the hypothesis that subjects vary more than items. (Or the reverse, if that's what you found.)  Do so, using the `hypothesis` function discussed in Week 4. -->
+
+<!-- * Plot the posterior distribution of the random intercept for item 4. -->
+
+<!-- * Make plots of the marginal effect of `vowel` for model `neutralization_m81`---one plot for an "average item/speaker" (CIs), and another for a new observation (PIs:`method = 'posterior_predict'`). -->

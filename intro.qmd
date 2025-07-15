@@ -1,0 +1,4 @@
+# Introduction
+
+These are lecture notes for LING 683, Fall 2024.
+

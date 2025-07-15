@@ -1,0 +1,557 @@
+# Bayesian Hierarchical Models 1 {#sec-bhm-1}
+
+These lecture notes cover topics from:
+
+-   @mcelreath2020statistical Sec. 13.0-13.2
+-   @kurz2021statistical : same sections
+
+Topics:
+
+-   First Bayesian Hierarchical Models
+    -   Random intercepts
+    -   Fixed-effect predictors
+-   Model interpretation: start
+    -   Model comparison
+    -   Plotting effects
+
+## Preliminaries
+
+Load libraries we will need:
+
+```{r, message=FALSE, cache=FALSE}
+library(brms)
+library(lme4)
+library(arm)
+library(tidyverse)
+
+library(tidybayes)
+library(bayestestR)
+
+library(bayesplot)
+library(loo)
+
+library(broom) ## for tidy model summaries
+library(broom.mixed) ## for tidy model summaries for lme4 models
+
+library(patchwork)
+```
+
+::: {.callout-tip collapse="true"}
+### Practical notes
+
+1.  If you have loaded `rethinking`, you need to detach it before using brms. See @kurz2021statistical Sec. 4.3.1.
+
+2.  I use the `file` argument when fitting `brms` models to make compiling this document easier (so the models don't refit every time I compile). You may or may not want to do this for your own models. See `file` and `file_refit` arguments in `?brm`.
+
+3.  Here I set the `file_refit` option so "brms will refit the model if model, data or algorithm as passed to Stan differ from what is stored in the file."
+
+```{r}
+options(brms.file_refit = "on_change")
+```
+
+4.  I use `chains = 4, cores = 4` when fitting `brm` models below---this means 4 chains, each to be run on one core on my laptop. `cores = 4` may need to be adjusted for your computer. (You may have fewer or more cores; I have 8 cores, so this leaves 50% free.) **You should figure out how to use multiple cores on your machine**. Starting today, we are fitting complex-enough models that this matters.
+:::
+
+### Data
+
+Load the `diatones` dataset and perform some data cleaning and recoding (see @sec-bb1-prelim, @sec-brm1-datasets):
+
+```{r}
+diatones <- read.csv("https://osf.io/tqjm8/download", stringsAsFactors = TRUE)
+
+# make numeric versions of all categorical predictors, while saving original versions
+diatones <- diatones %>% mutate(
+  syll1_coda_orig = syll1_coda,
+  syll2_coda_orig = syll2_coda,
+  syll2_td_orig = syll2_td,
+  ## turns no/yes -> 0/1
+  syll1_coda = ifelse(syll1_coda == "no", 0, 1),
+  ## turns '0'/'C'/'CC'/'CCC' -> 0/1/2/3
+  syll2_coda = str_count(syll2_coda_orig, "C"),
+  syll2_td = ifelse(syll2_td == "no", 0, 1)
+)
+
+## standardize all predictors using arm::rescale
+diatones <- diatones %>% mutate(
+  syll1_coda = rescale(syll1_coda_orig),
+  syll2_td = rescale(syll2_td_orig),
+  syll2_coda = rescale(syll2_coda),
+  frequency = rescale(frequency)
+)
+```
+
+<!-- Let's also load the `neutralization` data from *RMLD* [@rmld-book]---where this dataset is described in more detail (Sec. 3.3.1)---and perform some preprocessing (described in Sec. 10.1). -->
+
+<!-- ```{r} -->
+
+<!-- neutralization <- read.csv("https://osf.io/qg5fc/download", stringsAsFactors = TRUE) %>% -->
+
+<!--   mutate(voicing_fact = fct_relevel(voicing, "voiceless")) %>% -->
+
+<!--   filter(!is.na(prosodic_boundary)) %>% -->
+
+<!--   mutate( -->
+
+<!--     prosodic_boundary = rescale(prosodic_boundary), -->
+
+<!--     voicing = rescale(voicing_fact), -->
+
+<!--     item_pair = as.factor(item_pair), -->
+
+<!--     subject = as.factor(subject) -->
+
+<!--   ) -->
+
+<!-- ## Code multi-level factors with Helmert contrasts -->
+
+<!-- ## so that all predictors are centered -->
+
+<!-- contrasts(neutralization$vowel) <- contr.helmert -->
+
+<!-- contrasts(neutralization$place) <- contr.helmert -->
+
+<!-- ``` -->
+
+<!-- Recall that for this data: -->
+
+<!-- -   `voicing` is of primary interest -->
+
+<!-- -   The response is `vowel_duration` -->
+
+<!-- -   There are two grouping factors, `item_pair` and `subject` -->
+
+<!-- -   `voicing` varies within both item and subject -->
+
+<!-- -   `prosodic_boundary`, `vowel`, `place` are controls. -->
+
+## A first mixed-effects model: random intercepts
+
+McElreath makes a compelling case, similar to @gelman2007data, for using "varying intercept", "varying slope", etc., instead of "random intercept", etc. I will nonetheless use random intercept/slope terminology, at least at first, to make the connections with (frequentist) mixed-effects models clearer.
+
+For the `diatones` data, words (individual observations) with the same prefix (column `prefix`) may not be independent, and it is reasonable to consider models with a by-prefix random intercept. (See discussion in *RMLD* Sec. 9.2.) To illustrate, here is an empirical plot showing the proportion of words with shifted stress by prefix:
+
+```{r}
+#| code-fold: true
+
+diatones %>% ggplot(aes(x = prefix, y = stress_shifted)) +
+  stat_summary(fun.data = "mean_cl_boot") +
+  labs(x = "Prefix", y = "Proportion with shifted stress")
+```
+
+Note that the prefixes with average 0 or 1 have a small number of observations, but (except for "pre") not just 1:
+
+```{r}
+diatones %>% count(prefix)
+```
+
+The simplest possible frequentist mixed-effects model in this case would be this logistic regression:
+
+```{r}
+diatones_freq_m81 <- glmer(
+  stress_shifted ~ 1 + (1 | prefix), 
+  data = diatones, 
+  family = "binomial"
+  )
+```
+
+Model summary:
+
+```{r}
+tidy(diatones_freq_m81)
+```
+
+More verbose:
+
+```{r}
+summary(diatones_freq_m81)
+```
+
+The fitted parameters are:
+
+-   $\beta_0$ : overall intercept (log-odds of shifting stress)
+-   $\sigma_{p}$: SD of the by-prefix random intercept
+
+We can also extract the random intercept for each prefix (its offset from $\beta_0$, in log-odds):
+
+```{r}
+ranef(diatones_freq_m81)$prefix
+```
+
+Some notes:
+
+1.  There is a convergence issue.
+
+-   This can be easily solved by changing the optimizer, but it's typical of `glmer()` that even this very simple model doesn't fit correctly with default settings.
+
+2.  There is an estimate $\hat{\sigma}_{p}$, but no SE.
+3.  There are estimates of the random effects, but no SEs.
+
+We could add SEs for 2-3 (see *RMLD* Sec. TODO), but this is not the default, for good reasons---extra computation time, approximations which may not always be appropriate.
+
+All of these issues are solved for free in a Bayesian model![^week9-1]
+
+[^week9-1]: With the important caveat that "convergence" may just mean "result more influenced by the prior", in cases where `glmer()` is less likely to converge.
+
+<!-- TODO: can't get confint() to work, obscure bug. -->
+
+To fit the ayesian version, we just need priors on $\beta_0$ and $\sigma_{p}$. Let's use the same weakly informative priors as @mcelreath2020statistical Sec. 13.2.1. The probability model for $y_i$ (column `stress_shifted`) is then:
+
+```{=tex}
+\begin{align}
+y_i & \sim \text{Binomial}(1, p_i) \\
+\text{logit}(p_i) & = \beta_0 + \alpha_{\text{prefix}[i]} \\
+\alpha_j & \sim N(0, \sigma),  \\
+\beta_0 & \sim N(0, 1.5) \\
+\sigma & \sim \text{Exponential}(1),
+\end{align}
+```
+where $i=1, \ldots n$, the number of observations, and $j = 1 \ldots, n_{prefix}$, the number of prefixes.
+
+These are weakly-informative priors for $\beta_0$ and $\sigma$.[^week9-2]
+
+[^week9-2]: $\beta_0$ has most probability mass in log-odds of -4 to 4 = 0.02-0.98 probability. See the end of @kurz2021statistical Sec. 13.1 for a plot of the $\sigma$ prior.
+
+Fit this model in brms:
+
+```{r}
+## so you get the same 'random' result
+set.seed(5)
+
+diatones_m81 <- brm(
+  data = diatones,
+  family = binomial,
+  stress_shifted | trials(1) ~ 1 + (1 | prefix),
+  prior = c(
+    prior(normal(0, 1.5), class = Intercept), ## beta_0
+    prior(exponential(1), class = sd) ## sigma
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "models/diatones_m81.brm"
+)
+```
+
+(Note the notation for the random intercept is the same as `glmer()`.)
+
+Model summary:
+
+```{r}
+diatones_m81
+```
+
+Examine trace plots/posterior:
+
+```{r}
+plot(diatones_m81)
+```
+
+These look OK, though we might wonder whether the $\sigma$ posterior needs more iterations. Running the model for twice as long (left as an exercise) gives a similar-looking posterior, so we'll stick with this model.
+
+<!-- The $\sigma$ posterior looks like it potentially needs more iterations.[^week9-3] Let's run again: -->
+
+<!-- [^week9-3]: It is not smooth, which we expect posteriors to be by default. But the true posterior may also be "lumpy", which seems to be the case here. -->
+
+<!-- ```{r} -->
+
+<!-- diatones_m81 <- brm( -->
+
+<!--   data = diatones, -->
+
+<!--   family = binomial, -->
+
+<!--   stress_shifted | trials(1) ~ 1 + (1 | prefix), -->
+
+<!--   prior = c( -->
+
+<!--     prior(normal(0, 1.5), class = Intercept), ## beta_0 -->
+
+<!--     prior(exponential(1), class = sd) ## sigma -->
+
+<!--   ), -->
+
+<!--   iter = 4000, warmup = 2000, chains = 4, cores = 4, -->
+
+<!--   file = "models/diatones_m81.brm" -->
+
+<!-- ) -->
+
+<!-- diatones_m81 -->
+
+<!-- ``` -->
+
+<!-- ```{r} -->
+
+<!-- plot(diatones_m81) -->
+
+<!-- ``` -->
+
+<!-- That looks pretty similar, suggesting that this may just be the shape of the posterior.  -->
+
+$\hat{R}$ and ESS for the parameters shown look satisfactory.
+
+The model summary shows the parameters $\beta_0$ and $\sigma$, whose estimates and 95% CIs are similar (but not identical) to the frequentist model (`diatones_freq_m81`):
+
+```{r}
+summary(diatones_m81)
+```
+
+<!-- In particular, the confidence intervals are wider for the frequentist model, which is probably a consequence of the bayesian model having priors (even very weak ones).   -->
+
+The model also fits each $\alpha_j$, the random intercepts, but these are not shown by default.
+
+```{r}
+### list variables in the model
+variables(diatones_m81)
+```
+
+These also have posteriors, 95% CIs, trace plots, Rhat values, and so on:
+
+```{r}
+### posterior summary for *all* parameters, with 95% CIs:
+posterior_summary(diatones_m81)
+
+### show just random effect posteriors using 
+## regex to choose just parameters starting with 
+## r_
+post_ranef <- as_draws_df(diatones_m81, regex = "^r_")
+
+
+### posterior densities
+mcmc_dens(post_ranef, regex = "^r_")
+
+### trace plot
+mcmc_trace(post_ranef, regex = "^r_")
+
+## for all parameters in the model:
+
+## Rhat plot
+mcmc_plot(diatones_m81, type = "rhat") +
+## adds parameter names on y-axis
+yaxis_text(hjust = 1)
+
+## N_eff plot
+mcmc_plot(diatones_m81, type = "neff") + yaxis_text(hjust = 1)  
+#neff_ratio(diatones_m81) %>% mcmc_neff(size = 2, regex = "^r_") + yaxis_text(hjust = 1)
+```
+
+These plots, together with posterior + trace plots above, suggest our model is decent:
+
+-   $\hat{R}$ always very near 1
+-   No posteriors look bizarre -- all at least roughly unimodal, smooth.
+-   Trace plots look fine.
+-   (And: Sampling not very inefficient for any parameter.)
+
+In this model there is only one random-effect term, with few levels. In a more realistic model there are hundreds or thousands of random effect terms. Typically it is infeasible to actually examine posterior plots, etc., for all terms, so we rely on diagnostics like checking if *any* parameter has $\hat{R}>>1$.
+
+We'd do this with plots like the following:
+
+```{r}
+#| code-fold: true
+
+p1 <- mcmc_plot(diatones_m81, type = "rhat")
+p2 <- mcmc_plot(diatones_m81, type = "neff")
+
+p1 / p2
+```
+
+Note that the posteriors for individual random effects look different from what we're used to---many don't look normal, and several look highly skewed. This is fine, and in fact makes sense: there is no reason these parameters need to have normal posterior distributions, and it is expected that some posteriors will be skewed, which is an effect of "partial pooling".
+
+::: {#exr-bhm1-1}
+This code gets draws from the posterior of the predicted log-odds of `shifted_stress` for words with prefix *de*, as column `pred_logit`:
+
+```{r}
+diatones_m81 %>%
+  spread_draws(`r_prefix[de,Intercept]`, b_Intercept) %>%
+  mutate(pred_logit = `r_prefix[de,Intercept]` + b_Intercept)
+```
+
+a.  Explain how this works: what two parameters are added to make up `pred_logit`?
+
+b.  Use these draws to plot the posterior of the *probability* of `shifted_stress` for words with prefix *de*.
+
+c.  *Extra*: Make a similar plot, with one panel per prefix. That is, first each facet/panel should show the posterior of the probability of `shifted_stress` for words with a different prefix (levels of `prefix`). (Hint: read more about `tidybayes` notation.)
+:::
+
+## Complexifying and interpreting the model
+
+Let's now fit a realistic model of the `diatones` data, including predictors---this is the frequentist model from *RMLD* Sec. 9.2.1. There are now several \`fixed-effect' predictors.
+
+For priors we will use:
+
+-   Intercept: $N(0,5)$
+    -   same as the `diatones_m41` model from @sec-brm1-logistic.
+-   Each $\beta_i$: $N(0,3)$:
+    -   same
+-   Random intercept variance: $\text{Exponential}(1)$, as above.
+
+Here we are using essentially "flat" priors, just to keep things simpler for the moment (we don't have to decide on "weakly informative" values).
+
+```{r}
+diatones_m82 <- brm(
+  data = diatones,
+  stress_shifted | trials(1) ~ syll2_coda + syll2_td + frequency + syll1_coda + syll2_td:frequency + syll1_coda:frequency + (1 | prefix),
+  family = binomial,
+  prior = c(
+    prior(normal(0, 5), class = Intercept), # beta_0
+    prior(normal(0, 3), class = b), # beta_i
+    prior(exponential(1), class = sd) # sigma
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "models/diatones_m82.brm"
+)
+```
+
+Model summary:
+
+```{r}
+diatones_m82
+```
+
+::: {#exr-bhm1-2}
+Examine some diagnostics for this model, just for the parameters shown by `summary()`. Do you see any sign that the model hasn't "converged" (good posterior sample for all parameters)? If so, re-fit the model with more iterations.
+:::
+
+Solution:
+
+```{r}
+#| code-fold: true
+
+## yes, you need more iterations
+diatones_m82 <- brm(
+  data = diatones,
+  stress_shifted | trials(1) ~ syll2_coda + syll2_td + frequency + syll1_coda + syll2_td:frequency + syll1_coda:frequency + (1 | prefix),
+  family = binomial,
+  prior = c(
+    prior(normal(0, 5), class = Intercept), # beta_0
+    prior(normal(0, 3), class = b), # beta_i
+    prior(exponential(1), class = sd) # sigma
+  ),
+  iter = 5000, warmup = 2500, chains = 4, cores = 4,
+  file = "models/diatones_m82.brm"
+)
+
+
+```
+
+```{r, eval=FALSE}
+#| code-fold: true
+summary(diatones_m82)
+
+## (We'll return to the "divergent transitions" message below.)
+```
+
+### Model comparison
+
+We can ask whether adding the random intercept term is justified by comparing to a model without this term, using PSIS ("LOO"), from @sec-model-quality :
+
+```{r, message = FALSE}
+diatones_m83 <- brm(
+  data = diatones,
+  stress_shifted | trials(1) ~ syll2_coda + syll2_td + frequency + syll1_coda + syll2_td:frequency + syll1_coda:frequency,
+  family = binomial,
+  prior = c(
+    prior(normal(0, 5), class = Intercept), # beta_0
+    prior(normal(0, 3), class = b) # beta_i
+  ),
+  iter = 2000, warmup = 1000, chains = 4, cores = 4,
+  file = "models/diatones_m83.brm"
+)
+```
+
+```{r}
+diatones_m82 <- add_criterion(diatones_m82, c("loo"))
+diatones_m83 <- add_criterion(diatones_m83, c("loo"))
+loo_compare(diatones_m82, diatones_m83)
+```
+
+Depending on the model selection criterion we use---lowest PSIS, versus lowest PSIS up to 95% CredI---either model could be preferred. (See the end of @sec-model-quality for discussion.)
+
+<!-- This comparison suggests that the model *with* the random intercept is preferred.  In addition, the difference in WAIC/LOO is too small to clearly differentiate the models. -->
+
+### Plotting effects {#sec-bhm2-plotting-effects}
+
+As for non-hierarchical models (@sec-brm1-marginal, @sec-pred-effects-1), there are various ways to plot effects:
+
+-   Making your own plots (using `predict()` or `fitted()` from brms) or using pre-existing functions.
+-   Confidence intervals vs. prediction intervals
+
+<!-- It's always an option to: -->
+
+<!-- * Define your own dataframe, of values to be predicted at -->
+
+<!-- * Get predictions with 95% CIs or PI%s, using `predict` or `fitted` from `brms`. -->
+
+<!-- Some decisions need to be made to make marginal effect plots, especially about what uncertainty to show,and this workflow lets you make the decisions. -->
+
+<!-- You can also use pre-made functions.  There is excellent functionality in `brms::conditional_effects` and `bayesplot`---see the [vignette](http://mjskay.github.io/tidybayes/articles/tidy-brms.html) for the latter ("fit/prediction curves"). -->
+
+For example: plot the marginal effect of `frequency`, averaging over other predictors, with 95% CIs:
+
+```{r}
+conditional_effects(diatones_m82, effects = "frequency")
+```
+
+Predictions here are "fitted vlaues": the expected value of the probability of stress shifting for an "average prefix". <!-- (Analogous to brms `fitted`.)   --> These are on the probability scale; to get predictions on the log-odds scale, you'd need to use `posterior_linpred()`. You can alternatively get PIs from the posterior predictive distribution, which will give a larger interval.
+
+<!-- %(Analogous to brms `predict`, see `?posterior_predict`.)  -->
+
+This won't do something sensible for the current example:
+
+```{r}
+conditional_effects(diatones_m82, effects = "frequency", method = "posterior_predict")
+```
+
+(An exercise next week will be to try this for a linear regression model)
+
+We discussed fitted values vs. model predictions in @sec-pred-effects-1.
+
+::: {#exr-bhm1-3}
+a.  Make plots visualizing the `syll1:frequency` and `syll2_td:frequency` interactions, like *RMLD* Fig. 9.4. (It's OK if your figures don't treat `syll1_coda` and `syll2_td` as factors,or maybe you can figure out how to do this.)[^week9-3]
+
+<!-- ```{r} -->
+
+<!-- conditional_effects(diatones_m82, effects='frequency:syll1_coda') -->
+
+<!-- conditional_effects(diatones_m82, effects='frequency:syll2_td') -->
+
+<!-- ``` -->
+
+b.  *Extra*: You should have found that the plot looks similar to the plot for the frequentist model. Let's use the Bayesian model to make a prediction plot that would be much harder, if possible at all, using the frequentist model: the frequency effect just for words with prefix = `iN`.
+
+-   Make a dataframe of new values to predict at:
+    -   `prefix`=*iN*
+    -   `syll2_coda`=`syll2_td`=0 (held at average values)
+    -   `syll1_coda`=-0.22 (recall: `syll1_coda` is a prefix-level predictor; this is its value for prefix `iN`)
+    -   Let `frequency` range between -1.5 and 1.5 (meaning +-3 SD of `frequency` before it was standarized).
+-   Use `fitted()` to get predictions with 95% CIs.
+-   Plot these predictions, to make a plot like the one above with `frequency` on the $x$-axis.[^week9-4]
+-   You should find that the plot looks different from the `frequency` plot above, both in terms of its mean and the width of the CI. Why is this?[^week9-5]
+:::
+
+[^week9-3]: Hint: examples in `?conditional_effects`.
+
+[^week9-4]: Hint: Kurz 13.5.1
+
+[^week9-5]: Hint: examine the posterior for `iN`'s random effect, and look how common this prefix is.
+
+## Extra
+
+Model `diatones_m82` has some divergent transitions:
+
+```{r}
+diatones_m82
+```
+
+(You may have a different number of divergent transitions, as expected given that each MCMC fit is different.)
+
+In general this is not a problem to be ignored, as it indicates poor sampling of the posterior. However, a very small number of divergent transitions can be fine (e.g. 2 out of 10000). Nonetheless, let's take care of this by increasing `adapt_delta`, as suggested:
+
+```{r, message=FALSE, results=FALSE}
+diatones_m83_2 <- update(diatones_m82,control=list(adapt_delta=0.9))
+diatones_m83_2
+```
+
+Now there is no warning.
+
+You can check that the resulting model is very similar to `diatones_m82`, but in general models before and after fixing divergent transitions issues can be very different.
+
+Note that `adapt_delta` must be smaller than 1. The `brms` default is 0.8, while McElreath's default (in `rethinking::ulam`) is 0.95. (These are just defaults, one isn't better than the other.)
