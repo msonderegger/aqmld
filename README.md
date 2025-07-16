@@ -1,3 +1,6 @@
+[![DOI](https://zenodo.org/badge/1020351273.svg)](https://doi.org/10.5281/zenodo.15942068)
+
+
 # Advanced Quantitative Methods for Linguistic Data: An e-book
 
  This e-book is a study guide on quantitative methods for linguistic data, beyond the (2025) standard of frequentist linear and logistic (mixed-effects) regression modeling. Each chapter assumes that you have done readings indicated at the beginning of the chapter, each of which corresponds roughly to a week of a semester-long course (see “Context”).
