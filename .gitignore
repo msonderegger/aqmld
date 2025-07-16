@@ -1,4 +1,3 @@
-/_book
 /bayesian-basics-1_cache/html
 /bayesian-basics-1_files
 /bayesian-basics-2_cache
@@ -41,3 +40,6 @@ jeanne_data_scratch.R
 /multivariate-models_files
 fda_data/danish_mod2.rds
 french_childes_m1.brm.rds
+.Rproj.user
+
+/.quarto/

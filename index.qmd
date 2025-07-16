@@ -19,7 +19,7 @@ We use datasets from (incomplete list):
 -   [Gaurav Kamath](https://grvkamath.github.io/): in @sec-gams-beyond
 -   [Michele Gubian](https://www.en.phonetik.uni-muenchen.de/people/staff/gubian_michele/index.html): in @sec-fpca
 -   [Rasmus Puggaard-Rode](https://rpuggaardrode.github.io/): in @sec-fpca <!--* [James Kirby](https://www.phonetik.uni-muenchen.de/~jkirby/): in @sec-hw3
-            -->
+                    -->
 
 ## Context
 
@@ -34,7 +34,7 @@ Each chapter includes:
 1.  **Applications to linguistic data** of concepts from the reading
 2.  **Practical illustration** of topics from the reading
 3.  **Exercises** <!--: to build under be done in class, or on your own time--> <!--**Homework problems**: to be turned in for assessment.
-            -->
+                    -->
 
 The motivation for these notes is a lack of (1) and/or (2) and/or (3) in existing resources. To help linguists develop their quantitative toolbox, this study guide gives:
 
