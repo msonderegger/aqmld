@@ -401,11 +401,11 @@ Practical note
 </div>
 </div>
 </div>
-<p>We’ll make greater use today of the <a href="https://mc-stan.org/bayesplot/">bayesplot</a> package, which we previously used for posterior predictive checks (<span class="quarto-unresolved-ref">?sec-bb2</span>). This package also has extensive functionality for plotting MCMC draws and plotting MCMC diagnostics (such as trace plots), as covered in useful <a href="https://mc-stan.org/bayesplot/articles/index.html">vignettes</a> and the bayesplot paper <span class="citation" data-cites="gabry2019visualization">(<a href="references.html#ref-gabry2019visualization" role="doc-biblioref">Gabry et al. 2019</a>)</span>.</p>
+<p>We’ll make greater use today of the <a href="https://mc-stan.org/bayesplot/">bayesplot</a> package, which we previously used for posterior predictive checks (<a href="bayesian-basics-2.html" class="quarto-xref"><span>Chapter 2</span></a>). This package also has extensive functionality for plotting MCMC draws and plotting MCMC diagnostics (such as trace plots), as covered in useful <a href="https://mc-stan.org/bayesplot/articles/index.html">vignettes</a> and the bayesplot paper <span class="citation" data-cites="gabry2019visualization">(<a href="references.html#ref-gabry2019visualization" role="doc-biblioref">Gabry et al. 2019</a>)</span>.</p>
 <p>We’ll start using the <a href="http://mc-stan.org/loo/reference/loo-package.html">loo</a> package <span class="citation" data-cites="loo-package">Vehtari et al. (<a href="references.html#ref-loo-package" role="doc-biblioref">2024</a>)</span>, which implements methods for calculating model quality criteria from <span class="citation" data-cites="vehtari2017practical">Vehtari, Gelman, and Gabry (<a href="references.html#ref-vehtari2017practical" role="doc-biblioref">2017</a>)</span> that use “pointwise out-of-sample prediction accuracy”: LOO-CV and WAIC. See <a href="https://mc-stan.org/loo/articles/loo2-example.html">vignette</a>.</p>
 <section id="datasets" class="level3" data-number="4.1.1">
 <h3 data-number="4.1.1" class="anchored" data-anchor-id="datasets"><span class="header-section-number">4.1.1</span> Datasets</h3>
-<p>Load the <code>diatones</code> dataset and perform some data cleaning and recoding (see <span class="quarto-unresolved-ref">?sec-bb1-prelim</span>, <span class="quarto-unresolved-ref">?sec-brm1-datasets</span>):</p>
+<p>Load the <code>diatones</code> dataset and perform some data cleaning and recoding (see <a href="bayesian-basics-1.html#sec-bb1-prelim" class="quarto-xref"><span>Section 1.1</span></a>, <a href="bayesian-regression-models-1.html#sec-brm1-datasets" class="quarto-xref"><span>Section 3.1.1</span></a>):</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb2"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a>diatones <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="st">"https://osf.io/tqjm8/download"</span>, <span class="at">stringsAsFactors =</span> <span class="cn">TRUE</span>)</span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a></span>
@@ -518,12 +518,12 @@ Practical note: PSIS or WAIC?
 <p>It’s not immediately clear here whether the effect is linear or non-linear, and what degree the non-linear effect would be.</p>
 <p>We assess this by comparing models fit with <code>AgeSubject</code> and different effects of <code>WrittenFrequency</code>:</p>
 <ul>
-<li>Linear effect of <code>WrittenFrequency</code> (equivalent to <code>english_m43</code> from <span class="quarto-unresolved-ref">?sec-mult-lin-reg</span>)</li>
+<li>Linear effect of <code>WrittenFrequency</code> (equivalent to <code>english_m43</code> from <a href="bayesian-regression-models-1.html#sec-mult-lin-reg" class="quarto-xref"><span>Section 3.3</span></a>)</li>
 <li>Polynomial effect of <code>WrittenFrequency</code>, degree=2 (quadratic)</li>
 <li>Polynomial effect of <code>WrittenFrequency</code>, degree=3 (cubic)</li>
 <li>Polynomial effect of <code>WrittenFrequency</code>, degree=4 (quartic)</li>
 </ul>
-<p>Fit these models, using the same priors as in <span class="quarto-unresolved-ref">?sec-mult-lin-reg</span>:</p>
+<p>Fit these models, using the same priors as in <a href="bayesian-regression-models-1.html#sec-mult-lin-reg" class="quarto-xref"><span>Section 3.3</span></a>:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb7"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a>prior_1 <span class="ot">&lt;-</span> <span class="fu">c</span>(</span>
 <span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a>  <span class="fu">prior</span>(<span class="fu">normal</span>(<span class="dv">0</span>, <span class="dv">100</span>), <span class="at">class =</span> Intercept),</span>
@@ -826,7 +826,7 @@ Broader context: Using PSIS/WAIC for model selection
 <section id="example-bad-model" class="level4" data-number="4.3.1.2">
 <h4 data-number="4.3.1.2" class="anchored" data-anchor-id="example-bad-model"><span class="header-section-number">4.3.1.2</span> Example: bad model</h4>
 <p>What would posteriors plots (here) and MCMC diagnostics (next section) look like for a model where we hadn’t sampled for long enough, or there was a problem with the model specification?</p>
-<p>Let’s use the high-collinearity example model from <span class="quarto-unresolved-ref">?sec-brm1-collinearity</span> (<code>english_collin_m1</code>), but now refit using:</p>
+<p>Let’s use the high-collinearity example model from <a href="bayesian-regression-models-1.html#sec-brm1-collinearity" class="quarto-xref"><span>Section 3.3.3</span></a> (<code>english_collin_m1</code>), but now refit using:</p>
 <ul>
 <li>4 chains</li>
 <li><strong>100</strong> samples, of which 25/75 are warmup/real samples.</li>
@@ -907,7 +907,7 @@ Broader context: Using PSIS/WAIC for model selection
 <p>These plots do not look like enough samples have been taken to approximate the distribution, for most parameters.</p>
 <p>See the bayesplot <a href="https://cran.r-project.org/web/packages/bayesplot/vignettes/plotting-mcmc-draws.html">vignette</a> for various functions for plotting MCMC draws (from the posterior).</p>
 <div id="exr-brm2-4" class="theorem exercise">
-<p><span class="theorem-title"><strong>Exercise 4.2</strong></span> In <span class="quarto-unresolved-ref">?sec-brm1-beta1-prior</span>, we made a “hex plot” showing the bivariate posterior distribution of two coefficients for model <code>english_m41</code>. This exercise is to make a similar hex plot for the high-colinearity example model from <span class="quarto-unresolved-ref">?sec-brm1-collinearity</span> (<code>english_collin_m1</code>).</p>
+<p><span class="theorem-title"><strong>Exercise 4.2</strong></span> In <a href="bayesian-regression-models-1.html#sec-brm1-beta1-prior" class="quarto-xref"><span>Section 3.2.1.2</span></a>, we made a “hex plot” showing the bivariate posterior distribution of two coefficients for model <code>english_m41</code>. This exercise is to make a similar hex plot for the high-colinearity example model from <a href="bayesian-regression-models-1.html#sec-brm1-collinearity" class="quarto-xref"><span>Section 3.3.3</span></a> (<code>english_collin_m1</code>).</p>
 <ol type="a">
 <li><p>Figure out what <strong>bayesplot function</strong> is used to make this kind of plot.</p></li>
 <li><p>What are the names of the regression coefficients in model <code>english_collin_m1</code> corresponding to the predictors for word frequency (<code>WrittenFrequency_c</code>) and familiarity (<code>Familiarity_c</code>)?</p></li>
@@ -1074,7 +1074,7 @@ Broader context: Using PSIS/WAIC for model selection
 <div class="cell">
 <div class="sourceCode cell-code" id="cb24"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb24-1"><a href="#cb24-1" aria-hidden="true" tabindex="-1"></a><span class="fu">contrasts</span>(french_cdi_24<span class="sc">$</span>lexical_class) <span class="ot">&lt;-</span> <span class="fu">contr.helmert</span>(<span class="dv">4</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<p>Now, fit a Bayesian model like <code>cdi_cc_mod_1</code>, the frequentist (logistic regression) model described there. We’ll use similar “uninformative” priors to the <code>diatones</code> model (<span class="quarto-unresolved-ref">?sec-brm1-logistic</span>), which also used logistic regression.<a href="#fn4" class="footnote-ref" id="fnref4" role="doc-noteref"><sup>4</sup></a></p>
+<p>Now, fit a Bayesian model like <code>cdi_cc_mod_1</code>, the frequentist (logistic regression) model described there. We’ll use similar “uninformative” priors to the <code>diatones</code> model (<a href="bayesian-regression-models-1.html#sec-brm1-logistic" class="quarto-xref"><span>Section 3.4.1</span></a>), which also used logistic regression.<a href="#fn4" class="footnote-ref" id="fnref4" role="doc-noteref"><sup>4</sup></a></p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb25"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb25-1"><a href="#cb25-1" aria-hidden="true" tabindex="-1"></a>french_cdi_m51 <span class="ot">&lt;-</span> <span class="fu">brm</span>(</span>
 <span id="cb25-2"><a href="#cb25-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">data =</span> french_cdi_24,</span>
@@ -1106,7 +1106,7 @@ Broader context: Using PSIS/WAIC for model selection
 <span id="cb26-17"><a href="#cb26-17" aria-hidden="true" tabindex="-1"></a><span class="do">## and Tail_ESS are effective sample size measures, and Rhat is the potential</span></span>
 <span id="cb26-18"><a href="#cb26-18" aria-hidden="true" tabindex="-1"></a><span class="do">## scale reduction factor on split chains (at convergence, Rhat = 1).</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<p>We could do the whole process described above by getting model predictions for each level of <code>lexical_class</code>, for many posterior distributions (e.g.&nbsp;using <code>spread_draws()</code> from tidybayes). Instead we can use the emmeans package, which works with <code>brms</code> models analogously to its use with frequentist models. See <span class="quarto-unresolved-ref">?sec-brm1-marginal</span> (and the “Practical note” box there) for more on emmeans / similar packages for computing “marginal effects”.</p>
+<p>We could do the whole process described above by getting model predictions for each level of <code>lexical_class</code>, for many posterior distributions (e.g.&nbsp;using <code>spread_draws()</code> from tidybayes). Instead we can use the emmeans package, which works with <code>brms</code> models analogously to its use with frequentist models. See <a href="bayesian-regression-models-1.html#sec-brm1-marginal" class="quarto-xref"><span>Section 3.3.1</span></a> (and the “Practical note” box there) for more on emmeans / similar packages for computing “marginal effects”.</p>
 <p>To test for pairwise differences (“Tukey HSD”) between levels, for example:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb27"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb27-1"><a href="#cb27-1" aria-hidden="true" tabindex="-1"></a>emm1 <span class="ot">&lt;-</span> <span class="fu">emmeans</span>(french_cdi_m51, <span class="sc">~</span>lexical_class)</span>

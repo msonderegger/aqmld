@@ -68,4 +68,5 @@ Here is the introduction to the course syllabus, which should give a sense of wh
 
 ## Citation
 
-Sonderegger, Morgan, Sóskuthy, Márton, Lipari, Massimo, and Doucette, Amanda. (2025) *Advanced Quantitative Methods for Linguistic Data*. https://people.linguistics.mcgill.ca/\~morgan/adv-quant-methods/. 7/2025 version.
+Sonderegger, Morgan, Sóskuthy, Márton, Lipari, Massimo, and Doucette, Amanda. (2025) *Advanced Quantitative Methods for Linguistic Data*.  Version 0.2. [https://doi.org/10.5281/zenodo.15942068](https://doi.org/10.5281/zenodo.15942068).
+

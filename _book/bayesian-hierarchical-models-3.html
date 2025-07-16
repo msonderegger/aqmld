@@ -424,7 +424,7 @@ Practical notes
 <li>Model comparison using prediction (LOO, WAIC) vs.&nbsp;likelihood (Bayes factor).</li>
 <li>How tests differ for fixed and random effect terms.</li>
 </ol>
-<p>(a) and (b) were introduced for non-hierarchical models in <span class="quarto-unresolved-ref">?sec-brm1-ess</span>, while (c) is new for hierarchical models.</p>
+<p>(a) and (b) were introduced for non-hierarchical models in <a href="bayesian-regression-models-1.html#sec-brm1-ess" class="quarto-xref"><span>Section 3.7</span></a>, while (c) is new for hierarchical models.</p>
 <p>We will use the final model of the <code>neutralization</code> data fitted in the last chapter, which we refit as <code>neutralization_m11_1</code>. This is the same model as <code>neutralization_m10_3</code>, but with this argument added, to save all parameter draws:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb5"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a>save_pars <span class="ot">=</span> <span class="fu">save_pars</span>(<span class="at">all =</span> <span class="cn">TRUE</span>)</span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
@@ -456,7 +456,7 @@ Practical notes
 <h3 data-number="7.2.1" class="anchored" data-anchor-id="fixed-effects"><span class="header-section-number">7.2.1</span> Fixed effects</h3>
 <section id="existence-and-significance" class="level4" data-number="7.2.1.1">
 <h4 data-number="7.2.1.1" class="anchored" data-anchor-id="existence-and-significance"><span class="header-section-number">7.2.1.1</span> Existence and significance</h4>
-<p>The <em>existence</em> of the <code>voicing</code> fixed effect is clear from the posterior of <code>neutralization_m11_1</code>. We can confirm this by calculating <span class="math inline">\(p_d\)</span> (see <span class="quarto-unresolved-ref">?sec-brm1-ie</span>):</p>
+<p>The <em>existence</em> of the <code>voicing</code> fixed effect is clear from the posterior of <code>neutralization_m11_1</code>. We can confirm this by calculating <span class="math inline">\(p_d\)</span> (see <a href="bayesian-regression-models-1.html#sec-brm1-ie" class="quarto-xref"><span>Section 3.7.1</span></a>):</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb7"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb7-1"><a href="#cb7-1" aria-hidden="true" tabindex="-1"></a><span class="fu">pd</span>(neutralization_m11_1)</span>
 <span id="cb7-2"><a href="#cb7-2" aria-hidden="true" tabindex="-1"></a><span class="do">## Probability of Direction</span></span>
@@ -473,7 +473,7 @@ Practical notes
 <span id="cb7-13"><a href="#cb7-13" aria-hidden="true" tabindex="-1"></a><span class="do">## vowel4            |   100%</span></span>
 <span id="cb7-14"><a href="#cb7-14" aria-hidden="true" tabindex="-1"></a><span class="do">## prosodic_boundary |   100%</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<p>For significance, we calculate <span class="math inline">\(p_{\text{ROPE}}\)</span> (see <span class="quarto-unresolved-ref">?sec-brm1-rope</span>), assuming a rope of [-5 msec, 5 msec]:</p>
+<p>For significance, we calculate <span class="math inline">\(p_{\text{ROPE}}\)</span> (see <a href="bayesian-regression-models-1.html#sec-brm1-rope" class="quarto-xref"><span>Section 3.7.2</span></a>), assuming a rope of [-5 msec, 5 msec]:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb8"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="fu">rope</span>(neutralization_m11_1, <span class="at">range =</span> <span class="fu">c</span>(<span class="sc">-</span><span class="dv">5</span>, <span class="dv">5</span>), <span class="at">ci =</span> <span class="dv">1</span>)</span>
 <span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a><span class="do">## # Proportion of samples inside the ROPE [-5.00, 5.00]:</span></span>
@@ -498,7 +498,7 @@ Practical notes
 </section>
 <section id="bayes-factor-vs.-loo-comparison" class="level4" data-number="7.2.1.2">
 <h4 data-number="7.2.1.2" class="anchored" data-anchor-id="bayes-factor-vs.-loo-comparison"><span class="header-section-number">7.2.1.2</span> Bayes factor vs.&nbsp;LOO comparison</h4>
-<p>Recall that to calculate Bayes Factors, we should re-fit the model with more iterations (<span class="quarto-unresolved-ref">?sec-brm1-bf</span>), at least 40,000 posterior samples. This is left as an exercise for all Bayes Factor calculations in this chapter—since re-fitting each model may take a long time on your computer (each one takes a couple of minutes on mine), we’ll just compute Bayes Factors using our current models (fitted with fewer iterations) and assume they are accurate enough.<a href="#fn1" class="footnote-ref" id="fnref1" role="doc-noteref"><sup>1</sup></a> For a “real” analysis, make sure to use enough iterations.</p>
+<p>Recall that to calculate Bayes Factors, we should re-fit the model with more iterations (<a href="bayesian-regression-models-1.html#sec-brm1-bf" class="quarto-xref"><span>Section 3.7.3</span></a>), at least 40,000 posterior samples. This is left as an exercise for all Bayes Factor calculations in this chapter—since re-fitting each model may take a long time on your computer (each one takes a couple of minutes on mine), we’ll just compute Bayes Factors using our current models (fitted with fewer iterations) and assume they are accurate enough.<a href="#fn1" class="footnote-ref" id="fnref1" role="doc-noteref"><sup>1</sup></a> For a “real” analysis, make sure to use enough iterations.</p>
 <p>Now, calculate the Bayes Factor for the <code>voicing</code> fixed effect using our current model:</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb9"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="fu">bf_pointnull</span>(neutralization_m11_1)</span>
@@ -524,7 +524,7 @@ Practical notes
 </div>
 <p>The <code>voicing</code> row assesses: how significant is the <code>voicing</code> fixed effect?</p>
 <p>BF = 10-30 is “strong evidence” and 30-100 is “very strong”, so there is substantial evidence that the effect is meaningful.</p>
-<p>Another way to assess the importance of <code>voicing</code> would be to use LOO (<span class="quarto-unresolved-ref">?sec-model-quality</span>) to compare two models, with and without the <code>voicing</code> term:</p>
+<p>Another way to assess the importance of <code>voicing</code> would be to use LOO (<a href="bayesian-regression-models-2.html#sec-model-quality" class="quarto-xref"><span>Section 4.2</span></a>) to compare two models, with and without the <code>voicing</code> term:</p>
 <ul>
 <li><code>neutralization_m11_1</code></li>
 <li>The same model, with the <code>voicing</code> fixed effect excluded.</li>
@@ -583,7 +583,7 @@ Practical note: updating a model
 <span id="cb13-3"><a href="#cb13-3" aria-hidden="true" tabindex="-1"></a><span class="do">## neutralization_m11_1  0.0       0.0   </span></span>
 <span id="cb13-4"><a href="#cb13-4" aria-hidden="true" tabindex="-1"></a><span class="do">## neutralization_m11_2 -1.5       2.3</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<p>Suppose we are using the “more conservative” method from <span class="quarto-unresolved-ref">?sec-example-nonlinear</span>: choose the simplest model that doesn’t differ from others by more than two standard errors.</p>
+<p>Suppose we are using the “more conservative” method from <a href="bayesian-regression-models-2.html#sec-example-nonlinear" class="quarto-xref"><span>Section 4.2.1</span></a>: choose the simplest model that doesn’t differ from others by more than two standard errors.</p>
 <p>The models are not clearly different in terms of predictive accuracy. This is because the <code>voicing</code> term improves predictive accuracy little—it is a small effect, as expected. But it is clearly not <em>zero</em>, or in the ROPE, which is what matters for our research questions.</p>
 <p>This illustrates how “improves predictive accuracy” does not necessarily line up with “scientifically important”, a point emphasized by <span class="citation" data-cites="mcelreath2020statistical">McElreath (<a href="references.html#ref-mcelreath2020statistical" role="doc-biblioref">2020</a>)</span> (e.g.&nbsp;Sec. 7.5.1): a model with better predictive performance isn’t necessarily the one that more accurately reflects reality (= has the correct causal structure).<a href="#fn2" class="footnote-ref" id="fnref2" role="doc-noteref"><sup>2</sup></a> <!-- Vasishth et al.: "In general, even with moderate sample size, it can be difficult to compare nested hierarchical models (such as linear --> <!-- mixed models) based on predictive performance" (citing @wang2015difficulty).^[McElreath makes similar points, usually with "has a causal effect" rather than "is scientifically important".]   --></p>
 <div id="exr-bhm3-2" class="theorem exercise">

@@ -397,7 +397,7 @@ Practical notes
 </div>
 <section id="data" class="level3" data-number="5.1.1">
 <h3 data-number="5.1.1" class="anchored" data-anchor-id="data"><span class="header-section-number">5.1.1</span> Data</h3>
-<p>Load the <code>diatones</code> dataset and perform some data cleaning and recoding (see <span class="quarto-unresolved-ref">?sec-bb1-prelim</span>, <span class="quarto-unresolved-ref">?sec-brm1-datasets</span>):</p>
+<p>Load the <code>diatones</code> dataset and perform some data cleaning and recoding (see <a href="bayesian-basics-1.html#sec-bb1-prelim" class="quarto-xref"><span>Section 1.1</span></a>, <a href="bayesian-regression-models-1.html#sec-brm1-datasets" class="quarto-xref"><span>Section 3.1.1</span></a>):</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb3"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a>diatones <span class="ot">&lt;-</span> <span class="fu">read.csv</span>(<span class="st">"https://osf.io/tqjm8/download"</span>, <span class="at">stringsAsFactors =</span> <span class="cn">TRUE</span>)</span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a></span>
@@ -829,7 +829,7 @@ y_i &amp; \sim \text{Binomial}(1, p_i) \\
 <ul>
 <li>Intercept: <span class="math inline">\(N(0,5)\)</span>
 <ul>
-<li>same as the <code>diatones_m41</code> model from <span class="quarto-unresolved-ref">?sec-brm1-logistic</span>.</li>
+<li>same as the <code>diatones_m41</code> model from <a href="bayesian-regression-models-1.html#sec-brm1-logistic" class="quarto-xref"><span>Section 3.4.1</span></a>.</li>
 </ul></li>
 <li>Each <span class="math inline">\(\beta_i\)</span>: <span class="math inline">\(N(0,3)\)</span>:
 <ul>
@@ -928,7 +928,7 @@ y_i &amp; \sim \text{Binomial}(1, p_i) \\
 </div>
 <section id="model-comparison" class="level3" data-number="5.3.1">
 <h3 data-number="5.3.1" class="anchored" data-anchor-id="model-comparison"><span class="header-section-number">5.3.1</span> Model comparison</h3>
-<p>We can ask whether adding the random intercept term is justified by comparing to a model without this term, using PSIS (“LOO”), from <span class="quarto-unresolved-ref">?sec-model-quality</span> :</p>
+<p>We can ask whether adding the random intercept term is justified by comparing to a model without this term, using PSIS (“LOO”), from <a href="bayesian-regression-models-2.html#sec-model-quality" class="quarto-xref"><span>Section 4.2</span></a> :</p>
 <div class="cell">
 <div class="sourceCode cell-code" id="cb22"><pre class="sourceCode r code-with-copy"><code class="sourceCode r"><span id="cb22-1"><a href="#cb22-1" aria-hidden="true" tabindex="-1"></a>diatones_m83 <span class="ot">&lt;-</span> <span class="fu">brm</span>(</span>
 <span id="cb22-2"><a href="#cb22-2" aria-hidden="true" tabindex="-1"></a>  <span class="at">data =</span> diatones,</span>
@@ -950,12 +950,12 @@ y_i &amp; \sim \text{Binomial}(1, p_i) \\
 <span id="cb23-5"><a href="#cb23-5" aria-hidden="true" tabindex="-1"></a><span class="do">## diatones_m82  0.0       0.0   </span></span>
 <span id="cb23-6"><a href="#cb23-6" aria-hidden="true" tabindex="-1"></a><span class="do">## diatones_m83 -1.7       2.2</span></span></code><button title="Copy to Clipboard" class="code-copy-button"><i class="bi"></i></button></pre></div>
 </div>
-<p>Depending on the model selection criterion we use—lowest PSIS, versus lowest PSIS up to 95% CredI—either model could be preferred. (See the end of <span class="quarto-unresolved-ref">?sec-model-quality</span> for discussion.)</p>
+<p>Depending on the model selection criterion we use—lowest PSIS, versus lowest PSIS up to 95% CredI—either model could be preferred. (See the end of <a href="bayesian-regression-models-2.html#sec-model-quality" class="quarto-xref"><span>Section 4.2</span></a> for discussion.)</p>
 <!-- This comparison suggests that the model *with* the random intercept is preferred.  In addition, the difference in WAIC/LOO is too small to clearly differentiate the models. -->
 </section>
 <section id="sec-bhm2-plotting-effects" class="level3" data-number="5.3.2">
 <h3 data-number="5.3.2" class="anchored" data-anchor-id="sec-bhm2-plotting-effects"><span class="header-section-number">5.3.2</span> Plotting effects</h3>
-<p>As for non-hierarchical models (<span class="quarto-unresolved-ref">?sec-brm1-marginal</span>, <span class="quarto-unresolved-ref">?sec-pred-effects-1</span>), there are various ways to plot effects:</p>
+<p>As for non-hierarchical models (<a href="bayesian-regression-models-1.html#sec-brm1-marginal" class="quarto-xref"><span>Section 3.3.1</span></a>, <a href="bayesian-regression-models-1.html#sec-pred-effects-1" class="quarto-xref"><span>Section 3.2.2</span></a>), there are various ways to plot effects:</p>
 <ul>
 <li>Making your own plots (using <code>predict()</code> or <code>fitted()</code> from brms) or using pre-existing functions.</li>
 <li>Confidence intervals vs.&nbsp;prediction intervals</li>
@@ -990,7 +990,7 @@ y_i &amp; \sim \text{Binomial}(1, p_i) \\
 </div>
 </div>
 <p>(An exercise next week will be to try this for a linear regression model)</p>
-<p>We discussed fitted values vs.&nbsp;model predictions in <span class="quarto-unresolved-ref">?sec-pred-effects-1</span>.</p>
+<p>We discussed fitted values vs.&nbsp;model predictions in <a href="bayesian-regression-models-1.html#sec-pred-effects-1" class="quarto-xref"><span>Section 3.2.2</span></a>.</p>
 <div id="exr-bhm1-3" class="theorem exercise">
 <p><span class="theorem-title"><strong>Exercise 5.3</strong></span> &nbsp;</p>
 <ol type="a">
